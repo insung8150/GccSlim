@@ -31,12 +31,14 @@ gccslim-now
 
 - `bin/gccslim`: 공개 TUI 실행 파일.
 - `bin/gccslim-now`: 현재 Claude 세션을 직접 슬림 처리하는 wrapper.
-- `bin/gccslim-slim`: strip 처리된 Rust 슬림 바이너리.
-- `bin/gccslim-claude-patch`: strip 처리된 Rust Claude patch 바이너리.
+- `bin/gccslim-slim`: 플랫폼을 자동 선택하는 슬림 wrapper.
+- `bin/gccslim-claude-patch`: 플랫폼을 자동 선택하는 Claude patch wrapper.
+- `bin/linux-x86_64/`: strip 처리된 Linux x86_64 Rust 바이너리.
+- `bin/macos-arm64/`: strip 처리된 macOS arm64 Rust 바이너리.
 - `bin/gccfork_*.py`: 내부 호환 이름을 유지한 Python sidecar.
 - `share/gccslim/brain-system-prompt.md`: sanitize 된 런타임 프롬프트.
 
-일부 내부 dispatch 경로가 아직 legacy 이름을 호출하므로 `gccfork-slim`, `gccfork-claude-patch` 호환 복사본도 포함합니다.
+일부 내부 dispatch 경로가 아직 legacy 이름을 호출하므로 `gccfork-slim`, `gccfork-claude-patch` 호환 wrapper도 포함합니다.
 
 ## 제외 항목
 
