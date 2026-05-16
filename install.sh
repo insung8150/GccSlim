@@ -5,12 +5,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 SHARE_DIR="${HOME}/.local/share/gccslim"
 
-mkdir -p "$BIN_DIR" "$SHARE_DIR"
+mkdir -p "$BIN_DIR" "$SHARE_DIR" "$BIN_DIR/linux-x86_64" "$BIN_DIR/macos-arm64"
 
 install -m 0755 "$ROOT/bin/gccslim" "$BIN_DIR/gccslim"
 install -m 0755 "$ROOT/bin/gccslim-now" "$BIN_DIR/gccslim-now"
 install -m 0755 "$ROOT/bin/gccslim-slim" "$BIN_DIR/gccslim-slim"
 install -m 0755 "$ROOT/bin/gccslim-claude-patch" "$BIN_DIR/gccslim-claude-patch"
+install -m 0755 "$ROOT/bin/linux-x86_64/gccslim-slim" "$BIN_DIR/linux-x86_64/gccslim-slim"
+install -m 0755 "$ROOT/bin/linux-x86_64/gccslim-claude-patch" "$BIN_DIR/linux-x86_64/gccslim-claude-patch"
+install -m 0755 "$ROOT/bin/macos-arm64/gccslim-slim" "$BIN_DIR/macos-arm64/gccslim-slim"
+install -m 0755 "$ROOT/bin/macos-arm64/gccslim-claude-patch" "$BIN_DIR/macos-arm64/gccslim-claude-patch"
 
 # Compatibility names used by legacy internal dispatch paths.
 install -m 0755 "$ROOT/bin/gccfork-slim" "$BIN_DIR/gccfork-slim"
