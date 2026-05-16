@@ -6,6 +6,12 @@ This staging folder is a **binary distribution**, not the internal development s
 
 ![GccSlim usage guide](assets/gccslim-guide-en.png)
 
+## QR
+
+Scan this QR code to open the GitHub repository.
+
+![GccSlim GitHub QR](assets/gccslim-github-qr.png)
+
 ## Run
 
 Without installing:
