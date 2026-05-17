@@ -9547,6 +9547,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             fork_type="convert",
         )
         cmd = ["claude", "--resume", claude_sid]
+        _add_claude_name_if_supported(cmd, tab_title)
         mode_label = "🪟 새 창" if spawn_mode == "window" else "📑 새 탭"
         self._launch_custom_session_terminal(
             cmd=cmd,
@@ -9784,6 +9785,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             "--model", "sonnet",
             "--add-dir", repo_dir,
         ]
+        _add_claude_name_if_supported(cmd, display_name)
 
         if resume_sid:
             cmd += ["--resume", resume_sid]
@@ -9858,8 +9860,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             "--add-dir", repo_dir,
             "--session-id", new_sid,
             "--append-system-prompt", system_prompt,
-            user_prompt,
         ]
+        _add_claude_name_if_supported(cmd, display_name)
+        cmd.append(user_prompt)
 
         try:
             registry_set(
@@ -9914,8 +9917,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             "--add-dir", repo_dir,
             "--session-id", new_sid,
             "--append-system-prompt", system_prompt,
-            user_prompt,
         ]
+        _add_claude_name_if_supported(cmd, display_name)
+        cmd.append(user_prompt)
 
         try:
             registry_set(
@@ -10619,6 +10623,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         env = _sanitize_env_for_claude()
         env["GCCFORK_PENDING_NEW_ROOT_NAME"] = name
         cmd = ["claude"]
+        _add_claude_name_if_supported(cmd, name[:80])
         # spawn 표시용 색상 — 신규 세션은 아직 session.id 가 없으니 기본 흰 점 정도
         # 실제 색은 세션 등록 후 _set_root_color_map 이 자동 배정
         terminal = target_terminal or _detect_terminal()
@@ -11956,9 +11961,45 @@ def _write_bridge_spawn_request(
         return False
 
 
+_CLAUDE_NAME_SUPPORT: Optional[bool] = None
+
+
+def _claude_supports_name_option() -> bool:
+    """Return whether the installed Claude CLI accepts --name.
+
+    Public users can have older Claude CLI builds. Passing --name to those
+    versions aborts startup, so detect support and fall back silently.
+    """
+    global _CLAUDE_NAME_SUPPORT
+    if _CLAUDE_NAME_SUPPORT is not None:
+        return _CLAUDE_NAME_SUPPORT
+    if not shutil.which("claude"):
+        _CLAUDE_NAME_SUPPORT = False
+        return False
+    try:
+        res = subprocess.run(
+            ["claude", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        help_text = f"{res.stdout}\n{res.stderr}"
+        _CLAUDE_NAME_SUPPORT = "--name" in help_text
+    except Exception:
+        _CLAUDE_NAME_SUPPORT = False
+    return _CLAUDE_NAME_SUPPORT
+
+
+def _add_claude_name_if_supported(cmd: list[str], display_name: Optional[str]) -> None:
+    if display_name and _claude_supports_name_option():
+        cmd.extend(["--name", display_name[:80]])
+
+
 def _build_claude_cmd(action: str, session: Session, display_name: str) -> list[str]:
     """`claude` CLI argv 조립 (action==fork면 --fork-session)."""
     cmd = ["claude", "--resume", session.id]
+    _add_claude_name_if_supported(cmd, display_name)
     if action == "fork":
         cmd.append("--fork-session")
     return cmd
