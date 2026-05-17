@@ -9546,7 +9546,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             parent_id=session.id,
             fork_type="convert",
         )
-        cmd = ["claude", "--resume", claude_sid, "--name", tab_title]
+        cmd = ["claude", "--resume", claude_sid]
         mode_label = "🪟 새 창" if spawn_mode == "window" else "📑 새 탭"
         self._launch_custom_session_terminal(
             cmd=cmd,
@@ -9782,7 +9782,6 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             "claude",
             "--dangerously-skip-permissions",
             "--model", "sonnet",
-            "--name", display_name,
             "--add-dir", repo_dir,
         ]
 
@@ -9856,7 +9855,6 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             "claude",
             "--dangerously-skip-permissions",
             "--model", "sonnet",
-            "--name", display_name,
             "--add-dir", repo_dir,
             "--session-id", new_sid,
             "--append-system-prompt", system_prompt,
@@ -9913,7 +9911,6 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             "claude",
             "--dangerously-skip-permissions",
             "--model", "sonnet",
-            "--name", display_name,
             "--add-dir", repo_dir,
             "--session-id", new_sid,
             "--append-system-prompt", system_prompt,
@@ -10548,7 +10545,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         )
 
     def action_new_root(self) -> None:
-        """✨ 신규 루트 세션 — 이름 모달 → 새 터미널에 `claude --name "<name>"` (no --resume).
+        """✨ 신규 루트 세션 — 이름 모달 → 새 터미널에 `claude` (no --resume).
 
         claude 가 새 session UUID 생성 후 jsonl 작성 → auto-reload 가 감지 →
         _reconcile_pending_new_roots 가 cwd+timing 매칭으로 사용자 지정 이름 등록.
@@ -10589,7 +10586,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
                 "created_at": time.time(),
             })
 
-            # 새 터미널에 `claude --name "<name>"` spawn (resume 없음)
+            # 새 터미널에 `claude` spawn (resume 없음). 이름은 터미널 제목/registry로 보존.
             self._launch_claude_new_root(
                 name=name,
                 cwd=cwd,
@@ -10618,10 +10615,10 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         spawn_mode: str = "window",
         target_terminal: Optional[str] = None,
     ) -> None:
-        """`claude --name "<name>"` (no --resume) 새 터미널에 spawn."""
+        """`claude` (no --resume) 새 터미널에 spawn."""
         env = _sanitize_env_for_claude()
         env["GCCFORK_PENDING_NEW_ROOT_NAME"] = name
-        cmd = ["claude", "--name", name[:80]]
+        cmd = ["claude"]
         # spawn 표시용 색상 — 신규 세션은 아직 session.id 가 없으니 기본 흰 점 정도
         # 실제 색은 세션 등록 후 _set_root_color_map 이 자동 배정
         terminal = target_terminal or _detect_terminal()
@@ -11960,8 +11957,8 @@ def _write_bridge_spawn_request(
 
 
 def _build_claude_cmd(action: str, session: Session, display_name: str) -> list[str]:
-    """`claude` CLI argv 조립 (--name 포함, action==fork면 --fork-session)."""
-    cmd = ["claude", "--resume", session.id, "--name", display_name[:80]]
+    """`claude` CLI argv 조립 (action==fork면 --fork-session)."""
+    cmd = ["claude", "--resume", session.id]
     if action == "fork":
         cmd.append("--fork-session")
     return cmd
