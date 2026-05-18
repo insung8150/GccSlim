@@ -45,7 +45,7 @@ SLIM_MODE_ALIASES = {
 }
 
 SLIM_MODE_DEFAULT_KEEP_RECENT = {
-    "safe": 30,
+    "safe": 10,
     "strong": 3,
 }
 
@@ -981,7 +981,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         default="strong",
-        help="slim 강도: safe=30턴 보존, strong=3턴 보존. 옛 weak/medium은 safe, heavy-strong은 strong으로 해석",
+        help="slim 강도: safe=10턴 보존, strong=3턴 보존. 옛 weak/medium은 safe, heavy-strong은 strong으로 해석",
     )
     parser.add_argument(
         "--keep-recent",

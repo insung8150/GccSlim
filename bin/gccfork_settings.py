@@ -169,7 +169,7 @@ SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
 CODEX_SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
     "safe": (
         "안전 모드",
-        "이전 compact 요약 전부 + 현재 slim 본문 + 최근 raw 30턴을 보존합니다. 복구/검토 우선입니다.",
+        "이전 compact 요약 전부 + 현재 slim 본문 + 최근 raw 10턴을 보존합니다. 복구/검토 우선입니다.",
     ),
     "strong": (
         "강력 모드",
@@ -178,7 +178,7 @@ CODEX_SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
 }
 
 CODEX_SLIM_MODE_DEFAULT_KEEP: dict[str, int] = {
-    "safe": 30,
+    "safe": 10,
     "strong": 3,
 }
 
@@ -1496,7 +1496,7 @@ class SettingsScreen(ModalScreen[None]):
             "- medium: 균형형. 흐름 가독성과 절감 사이 절충, 최근 raw 기본 10턴 보존입니다.\n"
             "- weak: 보수형. 더 많이 보존하고 절감은 작으며, 최근 raw 기본 30턴 보존입니다.\n"
             "Codex 모드 의미:\n"
-            "- safe: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 30턴을 보존합니다. 복구/검토 우선입니다.\n"
+            "- safe: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 10턴을 보존합니다. 복구/검토 우선입니다.\n"
             "- strong: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 3턴만 보존합니다. 컨텍스트 확보 우선입니다.\n"
             "Codex slim 결과 구조:\n"
             "- compacted.payload.message 요약 #1..N\n"

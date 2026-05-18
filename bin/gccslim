@@ -4448,12 +4448,12 @@ class CodexSlimModeScreen(ModalScreen[Optional[dict]]):
     ]
 
     DEFAULT_KEEP = {
-        "safe": 30,
+        "safe": 10,
         "strong": 3,
     }
 
     MODE_HINTS = {
-        "safe": "안전 · compact 요약 전부 + 최근 30턴 raw",
+        "safe": "안전 · compact 요약 전부 + 최근 10턴 raw",
         "strong": "강력 · compact 요약 전부 + 최근 3턴 raw",
     }
 
