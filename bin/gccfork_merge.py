@@ -898,7 +898,7 @@ class MergeConfirmScreen(ModalScreen[Optional[dict]]):
     def compose(self) -> ComposeResult:
         with Vertical(id="merge-box"):
             with Horizontal(id="merge-header"):
-                yield Static("[b]GccSlim[/]", id="merge-brand", markup=True)
+                yield Static("[b]GccForK[/]", id="merge-brand", markup=True)
                 yield Static("[b]🗂 병합 — true merge (새 sid 통합)[/]",
                              id="merge-title", markup=True)
                 yield Static(f"[dim]v{self.gccfork_version}[/]",
@@ -1116,7 +1116,7 @@ class UnmergePreserveConfirmScreen(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         with Vertical(id="unmp-box"):
             with Horizontal(id="unmp-header"):
-                yield Static("[b]GccSlim[/]", id="unmp-brand", markup=True)
+                yield Static("[b]GccForK[/]", id="unmp-brand", markup=True)
                 yield Static("[b]🔧 분해 — 신규 작업 감지[/]",
                              id="unmp-title", markup=True)
                 yield Static(f"[dim]v{self.gccfork_version}[/]",

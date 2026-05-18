@@ -7,7 +7,7 @@
     "canary": "name:\"xxxxx\"",
     "expected_count_range": [1, 4]
   },
-  "source": "https://github.com/OWNER/GccSlim",
+  "source": "https://github.com/insung8150/GccSlim",
   "fetched_at": "2026-05-08T11:35:00Z",
-  "note": "Compiled-in defaults of the Claude patch helper. Override only when Claude Code restructures its bundle and the embedded byte sequences stop matching."
+  "note": "Compiled-in defaults of gccfork-claude-patch. Override only when Claude Code restructures its bundle and the embedded byte sequences stop matching."
 }

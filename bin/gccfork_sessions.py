@@ -84,8 +84,8 @@ def cwd_to_slug(cwd: str) -> str:
     """Claude Code 프로젝트 폴더 이름 생성 규칙.
 
     `/`, `_`, 비ASCII 문자를 모두 `-`로 치환.
-    예: `/home/user/projects/example`
-        → `-home-user-projects-example`
+    예: `/home/user/project`
+        → `-home-yooha-JOB-FOLD----------MindVault`
     """
     out = []
     for ch in cwd:

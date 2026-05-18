@@ -1,22 +1,17 @@
 #!/bin/bash
-# gccslim-now [<sid|prefix>] [--mode strong|medium|weak] [--dry-run]
+# gccfork-slim-now [<sid|prefix>] [--mode strong|medium|weak] [--dry-run]
 #                  [--keep-recent N] [--no-backup] [--json]
 #
 # 현재 활성 Claude Code 세션 (또는 명시한 sid) 의 jsonl 을 in-place 슬림.
 #
-# Rust 바이너리 우선 (~/.local/bin/gccslim-slim) — 없으면 Python fallback.
+# Rust 바이너리 우선 (~/.local/bin/gccfork-slim) — 없으면 Python fallback.
 # Rust 가 호환되지 않거나 실패해도 silent fallback (사용자 안내 X).
 
 set -e
 
 PROJECTS_DIR="${HOME}/.claude/projects"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_GCCSLIM_BIN="$SCRIPT_DIR/gccslim"
-DEFAULT_RUST_SLIM_BIN="$SCRIPT_DIR/gccslim-slim"
-[[ -x "$DEFAULT_GCCSLIM_BIN" ]] || DEFAULT_GCCSLIM_BIN="${HOME}/.local/bin/gccslim"
-[[ -x "$DEFAULT_RUST_SLIM_BIN" ]] || DEFAULT_RUST_SLIM_BIN="${HOME}/.local/bin/gccslim-slim"
-GCCFORK_BIN="${GCCSLIM_BIN:-${GCCFORK_BIN:-$DEFAULT_GCCSLIM_BIN}}"
-RUST_SLIM_BIN="${GCCSLIM_SLIM_BIN:-${GCCFORK_SLIM_BIN:-$DEFAULT_RUST_SLIM_BIN}}"
+GCCFORK_BIN="${GCCFORK_BIN:-${HOME}/.local/bin/gccfork}"
+RUST_SLIM_BIN="${GCCFORK_SLIM_BIN:-${HOME}/.local/bin/gccfork-slim}"
 
 if [[ ! -x "$GCCFORK_BIN" ]]; then
     echo "에러: $GCCFORK_BIN 실행 불가" >&2
@@ -71,7 +66,7 @@ if [[ -z "$SID" ]]; then
         [[ -z "$JSON_OUT" ]] && echo "(sessions/<pid>.json) sid=$SID"
     else
         echo "에러: ~/.claude/sessions/<PID>.json 에서 sid 추출 실패" >&2
-        echo "       sid 를 직접 인자로 넘기세요: gccslim-now <sid>" >&2
+        echo "       sid 를 직접 인자로 넘기세요: gccfork-slim-now <sid>" >&2
         exit 1
     fi
 fi
@@ -79,7 +74,7 @@ fi
 # ─── Rust 위임 (있으면) ───────────────────────────────────────────────
 # Rust 바이너리는 같은 인터페이스로 자기 sid 슬림 — `--sid <SID>` 로 호출.
 # 실패 시 silent 하게 Python fallback 으로 떨어짐.
-if [[ -x "$RUST_SLIM_BIN" ]] && [[ "${GCCSLIM_DISABLE_RUST:-${GCCFORK_DISABLE_RUST:-0}}" != "1" ]]; then
+if [[ -x "$RUST_SLIM_BIN" ]] && [[ "${GCCFORK_DISABLE_RUST:-0}" != "1" ]]; then
     if "$RUST_SLIM_BIN" --sid "$SID" "${PASSTHRU[@]}" 2>/dev/null; then
         exit 0
     fi

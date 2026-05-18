@@ -1111,7 +1111,7 @@ class ArchiveConfirmScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="arc-box"):
             with Horizontal(id="arc-header"):
-                yield Static("[b]GccSlim[/]", id="arc-brand", markup=True)
+                yield Static("[b]GccForK[/]", id="arc-brand", markup=True)
                 yield Static("[b]🗂 Archive 병합[/]", id="arc-title", markup=True)
                 yield Static(
                     f"[dim]v{self.gccfork_version}[/]",
@@ -1350,7 +1350,7 @@ class UnmergeConfirmScreen(ModalScreen[bool]):
 
         with Vertical(id="unm-box"):
             with Horizontal(id="unm-header"):
-                yield Static("[b]GccSlim[/]", id="unm-brand", markup=True)
+                yield Static("[b]GccForK[/]", id="unm-brand", markup=True)
                 yield Static("[b]🔧 분해 (병합 해제)[/]", id="unm-title", markup=True)
                 yield Static(
                     f"[dim]v{self.gccfork_version}[/]",

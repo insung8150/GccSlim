@@ -166,6 +166,32 @@ SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
     "weak":   ("🔻 슬림 (weak)",   "medium + 첨부 + 파일 history — 보수적 슬림 (~50% 원본)."),
 }
 
+CODEX_SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
+    "heavy-strong": (
+        "heavy-strong",
+        "가장 강한 절감. 오래된 model context 에서는 user turn 을 짧은 marker 로 남기고 assistant/developer/tool 노이즈를 크게 제거합니다. event replay 는 남겨 목록/스크롤 기록 확인은 가능합니다.",
+    ),
+    "strong": (
+        "strong",
+        "강한 절감. 오래된 user/assistant 의미 메시지를 짧게 줄이고 tool plumbing, reasoning, token_count 같은 실행 잡음을 제거합니다.",
+    ),
+    "medium": (
+        "medium",
+        "균형형. 오래된 메시지를 더 길게 보존해 흐름을 읽기 쉽고, tool/result 일부도 남겨 원인 추적 가능성을 높입니다.",
+    ),
+    "weak": (
+        "weak",
+        "보수형. 오래된 semantic 메시지를 거의 그대로 두고 최근 raw 범위도 가장 넓게 잡습니다. 절감률은 작지만 복구/감사용 원문성이 높습니다.",
+    ),
+}
+
+CODEX_SLIM_MODE_DEFAULT_KEEP: dict[str, int] = {
+    "heavy-strong": 3,
+    "strong": 3,
+    "medium": 15,
+    "weak": 50,
+}
+
 # 옛 키 마이그레이션 alias (CLI / 옛 registry 호환용)
 SLIM_MODE_ALIASES: dict[str, str] = {
     "strict": "strong",
@@ -173,7 +199,7 @@ SLIM_MODE_ALIASES: dict[str, str] = {
     "loose": "weak",
 }
 
-# claude `/slim` 슬래시명령이 gccslim TUI 에 위임할 때 참조하는 기본값.
+# claude `/slim` 슬래시명령이 gccfork TUI 에 위임할 때 참조하는 기본값.
 # 사용자는 SettingsScreen 의 [🔻 슬림] 탭에서 변경 가능.
 #
 # 보호 턴은 **모드별 차등** — 강도와 보호 강도가 합리적 그라데이션:
@@ -537,6 +563,13 @@ def _slim_options_text() -> str:
         "",
         "Codex:",
         "- 기본 모드: heavy-strong / strong / medium / weak",
+        "- 모드 요약:",
+    ]
+    for mode in ("heavy-strong", "strong", "medium", "weak"):
+        title, intro = CODEX_SLIM_MODE_LABELS[mode]
+        keep = CODEX_SLIM_MODE_DEFAULT_KEEP[mode]
+        lines.append(f"  - {title}: 최근 user 턴 기본 {keep}개 raw 보존. {_help_text_for_text_area(intro)}")
+    lines.extend([
         "- keep: 최근 user 턴 raw 보존 수",
         "- 원본 보존: slim 복제본 생성",
         "- 슬림 후 자동 열기",
@@ -544,7 +577,7 @@ def _slim_options_text() -> str:
         "- 새 탭으로 열기",
         "",
         "일반 슬림 세부 보존 옵션:",
-    ]
+    ])
     for mode in ("strong", "medium", "weak"):
         title, intro = SLIM_MODE_LABELS[mode]
         lines.append("")
@@ -724,7 +757,7 @@ class SettingsScreen(ModalScreen[None]):
         with Vertical(id="settings-box"):
             # ── 헤더 ───────────────────────────────────────────────
             with Horizontal(id="settings-header"):
-                yield Static("[b]GccSlim[/]", id="settings-brand", markup=True)
+                yield Static("[b]GccForK[/]", id="settings-brand", markup=True)
                 yield Static("[b]⚙ 설정[/]", id="settings-title", markup=True)
                 yield Static(
                     f"[dim]v{GCCFORK_VERSION}[/]",
@@ -1051,6 +1084,17 @@ class SettingsScreen(ModalScreen[None]):
                                     value=(cur_codex_mode == m),
                                     id=f"rb-codex_slim_default_mode-{m}",
                                     classes="settings-radio",
+                                )
+                        with Vertical(classes="settings-checkbox-row"):
+                            yield Static("[b]모드 요약[/]", classes="settings-radio-label", markup=True)
+                            for m in ("heavy-strong", "strong", "medium", "weak"):
+                                title, intro = CODEX_SLIM_MODE_LABELS[m]
+                                keep = CODEX_SLIM_MODE_DEFAULT_KEEP[m]
+                                yield Static(
+                                    f"[b]{title}[/]  [dim]최근 user 턴 기본 {keep}개 raw 보존[/]\n"
+                                    f"   {intro}",
+                                    classes="settings-item-hint",
+                                    markup=True,
                                 )
                         with Horizontal(classes="settings-turn-row"):
                             yield Static("keep", classes="settings-radio-label")
@@ -1444,6 +1488,11 @@ class SettingsScreen(ModalScreen[None]):
             "- strong: context 확보 우선. 가장 강하게 줄이고 최근 raw 기본 5턴만 보존합니다.\n"
             "- medium: 균형형. 흐름 가독성과 절감 사이 절충, 최근 raw 기본 10턴 보존입니다.\n"
             "- weak: 보수형. 더 많이 보존하고 절감은 작으며, 최근 raw 기본 30턴 보존입니다.\n"
+            "Codex 모드 의미:\n"
+            "- heavy-strong: 가장 강한 절감. 오래된 model context 에서는 user marker 중심으로 남기고 assistant/developer/tool 노이즈를 크게 제거합니다.\n"
+            "- strong: 강한 절감. 오래된 의미 메시지를 짧게 줄이고 tool plumbing/reasoning/token_count 를 제거합니다.\n"
+            "- medium: 균형형. 오래된 메시지를 더 길게 보존해 흐름 가독성과 절감률을 절충합니다.\n"
+            "- weak: 보수형. 오래된 semantic 메시지를 거의 그대로 두며 절감률보다 복구/감사용 원문성을 우선합니다.\n"
             "설명 규칙:\n"
             "- 한국어로 답합니다.\n"
             "- 현재 설정값만 근거로 설명합니다.\n"
