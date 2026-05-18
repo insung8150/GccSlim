@@ -167,29 +167,19 @@ SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
 }
 
 CODEX_SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
-    "heavy-strong": (
-        "heavy-strong",
-        "가장 강한 절감. 오래된 model context 에서는 user turn 을 짧은 marker 로 남기고 assistant/developer/tool 노이즈를 크게 제거합니다. event replay 는 남겨 목록/스크롤 기록 확인은 가능합니다.",
+    "safe": (
+        "안전 모드",
+        "이전 compact 요약 전부 + 현재 slim 본문 + 최근 raw 30턴을 보존합니다. 복구/검토 우선입니다.",
     ),
     "strong": (
-        "strong",
-        "강한 절감. 오래된 user/assistant 의미 메시지를 짧게 줄이고 tool plumbing, reasoning, token_count 같은 실행 잡음을 제거합니다.",
-    ),
-    "medium": (
-        "medium",
-        "균형형. 오래된 메시지를 더 길게 보존해 흐름을 읽기 쉽고, tool/result 일부도 남겨 원인 추적 가능성을 높입니다.",
-    ),
-    "weak": (
-        "weak",
-        "보수형. 오래된 semantic 메시지를 거의 그대로 두고 최근 raw 범위도 가장 넓게 잡습니다. 절감률은 작지만 복구/감사용 원문성이 높습니다.",
+        "강력 모드",
+        "이전 compact 요약 전부 + 현재 slim 본문 + 최근 raw 3턴만 보존합니다. 컨텍스트 확보 우선입니다.",
     ),
 }
 
 CODEX_SLIM_MODE_DEFAULT_KEEP: dict[str, int] = {
-    "heavy-strong": 3,
+    "safe": 30,
     "strong": 3,
-    "medium": 15,
-    "weak": 50,
 }
 
 # 옛 키 마이그레이션 alias (CLI / 옛 registry 호환용)
@@ -218,8 +208,9 @@ SLIM_DEFAULT_PREFS: dict[str, "str | int | bool"] = {
     "slim_default_visible_cap_compact": True,     # True 면 context 비포함 영역을 native compact marker 앞으로 (cap_overflow 시)
     "slim_default_send_other_env": False,         # True 면 다른 환경 (VSCode bridge / gnome-terminal) 로 보내기 디폴트
     "slim_default_newtab": False,                 # True 면 새 탭으로 열기, False 면 새 창
-    "codex_slim_default_mode": "heavy-strong",    # heavy-strong | strong | medium | weak
+    "codex_slim_default_mode": "strong",          # safe | strong
     "codex_slim_keep_recent": 3,                  # Codex /slim 기본 최근 user turn 보존 수
+    "codex_slim_include_compact_summaries": True, # 이전 compact/압축 요약을 새 컨텍스트에 포함
     "codex_slim_default_clone": False,            # True 면 원본 보존 slim 복제본 생성
     "codex_slim_default_reload": True,            # True 면 슬림 후 자동 열기/재시작
     "codex_slim_default_send_other_env": False,
@@ -562,15 +553,18 @@ def _slim_options_text() -> str:
         "- 최근 raw 보존 턴: 모드별 마지막 user 턴 원본 보존",
         "",
         "Codex:",
-        "- 기본 모드: heavy-strong / strong / medium / weak",
+        "- 기본 모드: safe / strong",
+        "- 이전 compact/압축 요약을 새 컨텍스트 앞에 시간순으로 포함",
+        "- 결과 구조: 압축요약 #1..N → 현재 slim 본문 → 최근 raw 보호 턴",
         "- 모드 요약:",
     ]
-    for mode in ("heavy-strong", "strong", "medium", "weak"):
+    for mode in ("safe", "strong"):
         title, intro = CODEX_SLIM_MODE_LABELS[mode]
         keep = CODEX_SLIM_MODE_DEFAULT_KEEP[mode]
         lines.append(f"  - {title}: 최근 user 턴 기본 {keep}개 raw 보존. {_help_text_for_text_area(intro)}")
     lines.extend([
         "- keep: 최근 user 턴 raw 보존 수",
+        "- 이전 압축요약 포함: compacted.payload.message 를 모두 모아 새 컨텍스트에 삽입",
         "- 원본 보존: slim 복제본 생성",
         "- 슬림 후 자동 열기",
         "- 다른 환경으로 보내기",
@@ -1075,10 +1069,12 @@ class SettingsScreen(ModalScreen[None]):
                             "Codex wrapper가 현재 프로젝트의 .gccfork/ccfork-prefs.json 값을 읽어 적용합니다.",
                             classes="settings-intro", markup=True,
                         )
-                        cur_codex_mode = str(pref_get("codex_slim_default_mode", "heavy-strong"))
+                        cur_codex_mode = str(pref_get("codex_slim_default_mode", "strong"))
+                        if cur_codex_mode not in CODEX_SLIM_MODE_LABELS:
+                            cur_codex_mode = "strong"
                         yield Static("[b]기본 모드[/]", classes="settings-radio-label", markup=True)
                         with RadioSet(id="rs-codex_slim_default_mode", classes="settings-radioset"):
-                            for m in ("heavy-strong", "strong", "medium", "weak"):
+                            for m in ("safe", "strong"):
                                 yield RadioButton(
                                     m,
                                     value=(cur_codex_mode == m),
@@ -1087,7 +1083,7 @@ class SettingsScreen(ModalScreen[None]):
                                 )
                         with Vertical(classes="settings-checkbox-row"):
                             yield Static("[b]모드 요약[/]", classes="settings-radio-label", markup=True)
-                            for m in ("heavy-strong", "strong", "medium", "weak"):
+                            for m in ("safe", "strong"):
                                 title, intro = CODEX_SLIM_MODE_LABELS[m]
                                 keep = CODEX_SLIM_MODE_DEFAULT_KEEP[m]
                                 yield Static(
@@ -1105,6 +1101,17 @@ class SettingsScreen(ModalScreen[None]):
                                 classes="settings-input",
                             )
                             yield Static("최근 user 턴 raw 보존", classes="settings-item-hint")
+                        with Vertical(classes="settings-checkbox-row"):
+                            yield Checkbox(
+                                "이전 compact/압축 요약을 새 컨텍스트에 포함",
+                                value=bool(pref_get("codex_slim_include_compact_summaries", True)),
+                                id="chk-codex_slim_include_compact_summaries",
+                                classes="settings-checkbox",
+                            )
+                            yield Static(
+                                "↳ 3번 압축됐다면 요약 #1, #2, #3을 시간순으로 모아 현재 slim 본문 앞에 넣습니다.",
+                                classes="settings-item-hint",
+                            )
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
                                 "원본 보존: slim 복제본 생성",
@@ -1489,10 +1496,12 @@ class SettingsScreen(ModalScreen[None]):
             "- medium: 균형형. 흐름 가독성과 절감 사이 절충, 최근 raw 기본 10턴 보존입니다.\n"
             "- weak: 보수형. 더 많이 보존하고 절감은 작으며, 최근 raw 기본 30턴 보존입니다.\n"
             "Codex 모드 의미:\n"
-            "- heavy-strong: 가장 강한 절감. 오래된 model context 에서는 user marker 중심으로 남기고 assistant/developer/tool 노이즈를 크게 제거합니다.\n"
-            "- strong: 강한 절감. 오래된 의미 메시지를 짧게 줄이고 tool plumbing/reasoning/token_count 를 제거합니다.\n"
-            "- medium: 균형형. 오래된 메시지를 더 길게 보존해 흐름 가독성과 절감률을 절충합니다.\n"
-            "- weak: 보수형. 오래된 semantic 메시지를 거의 그대로 두며 절감률보다 복구/감사용 원문성을 우선합니다.\n"
+            "- safe: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 30턴을 보존합니다. 복구/검토 우선입니다.\n"
+            "- strong: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 3턴만 보존합니다. 컨텍스트 확보 우선입니다.\n"
+            "Codex slim 결과 구조:\n"
+            "- compacted.payload.message 요약 #1..N\n"
+            "- 현재 세션의 slim 본문\n"
+            "- 최근 raw 보호 턴\n"
             "설명 규칙:\n"
             "- 한국어로 답합니다.\n"
             "- 현재 설정값만 근거로 설명합니다.\n"
@@ -1541,8 +1550,9 @@ class SettingsScreen(ModalScreen[None]):
             f"[고급 설정 펼침 상태]\n- {'펼쳐짐' if self._slim_advanced_open else '접힘'}\n\n"
             f"[고급 세부 보존 옵션]\n{json.dumps(advanced, ensure_ascii=False, indent=2)}\n\n"
             "[Codex 기본값]\n"
-            f"- mode: {pref_get('codex_slim_default_mode', 'heavy-strong')}\n"
+            f"- mode: {pref_get('codex_slim_default_mode', 'strong')}\n"
             f"- keep_recent: {pref_get('codex_slim_keep_recent', 3)}\n"
+            f"- include_compact_summaries: {pref_get('codex_slim_include_compact_summaries', True)}\n"
             f"- clone: {pref_get('codex_slim_default_clone', False)}\n"
             f"- reload: {pref_get('codex_slim_default_reload', True)}\n"
             f"- other_env: {pref_get('codex_slim_default_send_other_env', False)}\n"
@@ -1626,6 +1636,7 @@ class SettingsScreen(ModalScreen[None]):
             keys = (
                 "codex_slim_default_mode",
                 "codex_slim_keep_recent",
+                "codex_slim_include_compact_summaries",
                 "codex_slim_default_clone",
                 "codex_slim_default_reload",
                 "codex_slim_default_send_other_env",
@@ -1648,6 +1659,7 @@ class SettingsScreen(ModalScreen[None]):
             except Exception:
                 pass
             for chk_id, key in (
+                ("#chk-codex_slim_include_compact_summaries", "codex_slim_include_compact_summaries"),
                 ("#chk-codex_slim_default_clone", "codex_slim_default_clone"),
                 ("#chk-codex_slim_default_reload", "codex_slim_default_reload"),
                 ("#chk-codex_slim_default_send_other_env", "codex_slim_default_send_other_env"),
@@ -1802,6 +1814,7 @@ class SettingsScreen(ModalScreen[None]):
             "slim_weak_keep_recent_turns",
             "codex_slim_default_mode",
             "codex_slim_keep_recent",
+            "codex_slim_include_compact_summaries",
             "codex_slim_default_clone",
             "codex_slim_default_reload",
             "codex_slim_default_send_other_env",

@@ -36,11 +36,17 @@ INTERNAL_USER_PREFIXES = (
     "<turn_aborted>",
 )
 
+SLIM_MODE_ALIASES = {
+    "weak": "safe",
+    "medium": "safe",
+    "safe": "safe",
+    "strong": "strong",
+    "heavy-strong": "strong",
+}
+
 SLIM_MODE_DEFAULT_KEEP_RECENT = {
-    "weak": 50,
-    "medium": 15,
+    "safe": 30,
     "strong": 3,
-    "heavy-strong": 3,
 }
 
 
@@ -74,6 +80,7 @@ class SlimPlan:
     stats: SlimStats
     backup_path: Path
     slim_rows: list[bytes]
+    compact_summary_count: int = 0
 
     @property
     def saved_bytes(self) -> int:
@@ -231,19 +238,83 @@ def _content_with_replaced_text(content: Any, text: str) -> list[dict[str, Any]]
     return [{"type": "input_text", "text": text}]
 
 
+def normalize_slim_mode(mode: str) -> str:
+    normalized = SLIM_MODE_ALIASES.get(str(mode or "").strip(), "")
+    if not normalized:
+        raise ValueError(f"mode는 safe/strong 중 하나여야 합니다: {mode!r}")
+    return normalized
+
+
+def _extract_compacted_message(obj: dict[str, Any]) -> str:
+    if obj.get("type") != "compacted":
+        return ""
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    message = payload.get("message")
+    if isinstance(message, str):
+        return message.strip()
+    return ""
+
+
+def _compacted_summary_rows(rows: list[JsonlRow]) -> tuple[list[bytes], int]:
+    summaries: list[tuple[str, str]] = []
+    for row in rows:
+        obj = row.obj
+        if not isinstance(obj, dict):
+            continue
+        message = _extract_compacted_message(obj)
+        if not message:
+            continue
+        timestamp = str(obj.get("timestamp") or f"line {row.line_no}")
+        summaries.append((timestamp, message))
+    if not summaries:
+        return [], 0
+
+    parts = [
+        "# Codex 이전 compact/압축 요약 모음",
+        "",
+        "이 메시지는 GccSlim Codex slim이 JSONL의 compacted.payload.message를 시간순으로 모아 새 컨텍스트 앞에 넣은 것입니다.",
+        "아래 요약들은 과거 자동 압축 때 모델에 동적으로 주입되던 내용을 복구 가능한 평문 컨텍스트로 보존합니다.",
+    ]
+    for index, (timestamp, message) in enumerate(summaries, start=1):
+        parts.extend([
+            "",
+            f"## 압축 요약 #{index} ({timestamp})",
+            "",
+            message,
+        ])
+
+    payload = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "\n".join(parts).strip(),
+            }
+        ],
+        "codex_slim_context": {
+            "kind": "accumulated_compact_summaries",
+            "count": len(summaries),
+        },
+    }
+    return [_dump_jsonl({"type": "response_item", "payload": payload})], len(summaries)
+
+
 def _stub_message_payload(payload: dict[str, Any], *, mode: str) -> dict[str, Any] | None:
     role = payload.get("role")
     text = _extract_text(payload.get("content"))
     if not text:
         return None
 
-    if mode == "medium":
+    if mode == "safe":
         if role == "assistant":
-            limit = 1800
+            limit = 2200
         elif role == "user":
-            limit = 2400
-        else:
             limit = 3000
+        else:
+            limit = 3600
     else:
         if role == "assistant":
             limit = 700
@@ -251,13 +322,6 @@ def _stub_message_payload(payload: dict[str, Any], *, mode: str) -> dict[str, An
             limit = 900
         else:
             limit = 1200
-    if mode == "heavy-strong":
-        if role == "assistant":
-            limit = 320
-        elif role == "user":
-            limit = 420
-        else:
-            limit = 520
 
     shortened = _truncate_text(text, limit)
     if shortened == text:
@@ -275,22 +339,6 @@ def _stub_message_payload(payload: dict[str, Any], *, mode: str) -> dict[str, An
 
 def _stub_event_msg_payload(payload: dict[str, Any], *, mode: str) -> dict[str, Any] | None:
     event_type = payload.get("type")
-    if mode == "heavy-strong":
-        if event_type == "task_started":
-            return payload
-        if event_type == "task_complete":
-            replacement = dict(payload)
-            replacement["last_agent_message"] = None
-            replacement["codex_slim_stub"] = {
-                "mode": mode,
-                "reason": "older transcript completion duplicate removed",
-            }
-            return replacement
-        if event_type in {"user_message", "agent_message"}:
-            # These events are the visible resume transcript.  Keep them intact
-            # so mouse-wheel scrollback still shows the full recovered dialogue.
-            return payload
-
     text_key = None
     if event_type == "user_message":
         text_key = "message"
@@ -305,12 +353,8 @@ def _stub_event_msg_payload(payload: dict[str, Any], *, mode: str) -> dict[str, 
     if not isinstance(text, str) or not text.strip():
         return None
 
-    if mode == "weak":
+    if mode == "safe":
         limit = 4000
-    elif mode == "medium":
-        limit = 2200
-    elif mode == "heavy-strong":
-        limit = 480
     else:
         limit = 900
 
@@ -370,37 +414,12 @@ def _old_row_verdict(row: JsonlRow, mode: str) -> tuple[str, bytes | None]:
         # AGENTS.md/environment context can be huge; current run will inject it again.
         return ("DROP", None)
 
-    if mode == "heavy-strong":
-        if role != "user":
-            # In heavy-strong mode, older assistant/system/developer semantic
-            # messages are removed from the model context.  The full readable
-            # transcript remains available through event_msg replay.
-            return ("DROP", None)
-
-        text = _extract_text(payload.get("content"))
-        if not text:
-            return ("DROP", None)
-        shortened = _truncate_text(text, 180)
-        replacement = dict(payload)
-        replacement["content"] = _content_with_replaced_text(payload.get("content"), shortened)
-        replacement["codex_slim_stub"] = {
-            "mode": mode,
-            "reason": "older user message kept as compact turn marker",
-            "original_chars": len(text),
-        }
-        new_obj = dict(obj)
-        new_obj["payload"] = replacement
-        return ("STUB", _dump_jsonl(new_obj))
-
-    if mode == "weak":
-        return ("KEEP", row.raw)
-
     stubbed_payload = _stub_message_payload(payload, mode=mode)
     if stubbed_payload is None:
         return ("DROP", None)
 
-    # Medium preserves short semantic messages exactly; strong stubs all old
-    # semantic messages outside the recent window to fit Codex's smaller context.
+    # Safe preserves more semantic text; strong stubs old semantic messages
+    # outside the recent window to fit Codex's smaller context.
     if stubbed_payload is payload:
         return ("KEEP", row.raw)
 
@@ -420,9 +439,9 @@ def _recent_row_verdict(
     if obj is None:
         return ("DROP", None)
 
-    # Recent turns are the TUI replay surface.  Even in heavy-strong mode, keep
-    # their event/tool/turn_context rows intact; dropping "non-semantic" events
-    # can make `codex resume` open the session but render an empty transcript.
+    # Recent turns are the TUI replay surface. Keep their event/tool/turn_context
+    # rows intact; dropping "non-semantic" events can make `codex resume` open
+    # the session but render an empty transcript.
     return ("KEEP", row.raw)
 
 
@@ -459,9 +478,9 @@ def build_slim_plan(
     mode: str = "strong",
     keep_recent: int | None = None,
     codex_root: Path | None = None,
+    include_compact_summaries: bool = True,
 ) -> SlimPlan:
-    if mode not in SLIM_MODE_DEFAULT_KEEP_RECENT:
-        raise ValueError(f"mode는 weak/medium/strong 중 하나여야 합니다: {mode!r}")
+    mode = normalize_slim_mode(mode)
     if keep_recent is None:
         keep_recent = SLIM_MODE_DEFAULT_KEEP_RECENT[mode]
     if keep_recent < 1:
@@ -477,11 +496,27 @@ def build_slim_plan(
     latest_turn = total_turns
 
     slim_rows: list[bytes] = []
+    compact_rows, compact_summary_count = (
+        _compacted_summary_rows(rows) if include_compact_summaries else ([], 0)
+    )
+    compact_inserted = False
     kept = 0
     stubbed = 0
     dropped = 0
     for row in rows:
+        if not compact_inserted and row.obj and row.obj.get("type") != "session_meta":
+            slim_rows.extend(compact_rows)
+            kept += len(compact_rows)
+            compact_inserted = True
+
         turn_no = turn_by_line.get(row.line_no, 0)
+        payload = row.obj.get("payload") if isinstance(row.obj, dict) else None
+        if isinstance(payload, dict) and isinstance(payload.get("codex_slim_context"), dict):
+            dropped += 1
+            continue
+        if row.obj and row.obj.get("type") == "compacted":
+            dropped += 1
+            continue
         if turn_no >= recent_start:
             verdict, replacement = _recent_row_verdict(
                 row,
@@ -510,6 +545,10 @@ def build_slim_plan(
         else:
             dropped += 1
 
+    if not compact_inserted:
+        slim_rows.extend(compact_rows)
+        kept += len(compact_rows)
+
     _validate_jsonl_bytes(slim_rows)
 
     root = codex_root or CODEX_ROOT
@@ -534,6 +573,7 @@ def build_slim_plan(
         stats=SlimStats(kept=kept, stubbed=stubbed, dropped=dropped),
         backup_path=backup_path,
         slim_rows=slim_rows,
+        compact_summary_count=compact_summary_count,
     )
 
 
@@ -913,6 +953,7 @@ def _print_plan(plan: SlimPlan) -> None:
     print(f"user_turns: {plan.total_user_turns}")
     print(f"mode: {plan.mode}")
     print(f"keep_recent: {plan.keep_recent}")
+    print(f"compact_summaries: {plan.compact_summary_count}")
     print(f"lines: {plan.original_lines} -> {plan.slim_lines}  (drop {plan.dropped_lines})")
     print(
         f"verdict: KEEP={plan.stats.kept}  "
@@ -939,15 +980,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=sorted(SLIM_MODE_DEFAULT_KEEP_RECENT),
         default="strong",
-        help="slim 강도: weak=50턴, medium=15턴, strong=3턴, heavy-strong=3턴+최근 구간 추가 압축",
+        help="slim 강도: safe=30턴 보존, strong=3턴 보존. 옛 weak/medium은 safe, heavy-strong은 strong으로 해석",
     )
     parser.add_argument(
         "--keep-recent",
         type=int,
         default=None,
         help="최근 사용자 턴 원본 보존 개수. 생략 시 --mode 기본값 사용",
+    )
+    parser.add_argument(
+        "--include-compact-summaries",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="이전 compact/압축 요약 payload.message를 새 컨텍스트 앞에 누적 삽입",
     )
     parser.add_argument("--dry-run", action="store_true", help="계획만 출력하고 파일은 바꾸지 않음")
     parser.add_argument("--yes", action="store_true", help="확인 없이 적용")
@@ -1004,6 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             keep_recent=args.keep_recent,
             codex_root=args.codex_root,
+            include_compact_summaries=args.include_compact_summaries,
         )
     except Exception as exc:
         print(f"오류: {exc}", file=sys.stderr)
