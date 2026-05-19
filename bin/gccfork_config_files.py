@@ -53,8 +53,8 @@
 | 🌐 | 글로벌 CLAUDE.md | `~/.claude/CLAUDE.md` | 항상 |
 | 📂 | 프로젝트 CLAUDE.md | `<cwd>/CLAUDE.md` | cwd 기준 |
 | 🧠 | 프로젝트 MEMORY.md | `~/.claude/projects/<slug>/memory/MEMORY.md` | 자동 발견 |
-| 🌍 | GLOBAL_MEMORY.md | `~/beads_for_claude/GLOBAL_MEMORY.md` | 있을 때만 |
-| 🖥 | 시스템구동서버앱.md | `~/beads_for_claude/시스템구동서버앱.md` | 있을 때만 |
+| 🌍 | GLOBAL_MEMORY.md | `~/.gccslim/memory/GLOBAL_MEMORY.md` | 있을 때만 |
+| 🖥 | system-apps.md | `~/.gccslim/memory/system-apps.md` | 있을 때만 |
 | 📁 | 메모리 폴더 전체 | `~/.claude/projects/<slug>/memory/` (디렉토리) | VSCode/cursor 만 |
 | 📝 | 메모리 *.md 개별 | 같은 폴더 안 모든 .md | 동적 expand |
 """
@@ -209,13 +209,13 @@ def discover_config_files(current_cwd: Optional[str]) -> list[ConfigFileEntry]:
     # 4. GLOBAL_MEMORY.md
     entries.append(_file_entry(
         "GLOBAL_MEMORY.md", "🌍",
-        home / "beads_for_claude" / "GLOBAL_MEMORY.md",
+        home / ".gccslim/memory" / "GLOBAL_MEMORY.md",
     ))
 
-    # 5. 시스템구동서버앱.md
+    # 5. system-apps.md
     entries.append(_file_entry(
-        "시스템구동서버앱.md", "🖥",
-        home / "beads_for_claude" / "시스템구동서버앱.md",
+        "system-apps.md", "🖥",
+        home / ".gccslim/memory" / "system-apps.md",
     ))
 
     return entries
@@ -873,8 +873,8 @@ def _build_source_signatures(current_cwd: Optional[str]) -> list[tuple[str, Path
     for label, path in [
         ("글로벌 CLAUDE.md", home / ".claude" / "CLAUDE.md"),
         ("프로젝트 CLAUDE.md", Path(current_cwd) / "CLAUDE.md") if current_cwd else (None, None),
-        ("GLOBAL_MEMORY.md", home / "beads_for_claude" / "GLOBAL_MEMORY.md"),
-        ("시스템구동서버앱.md", home / "beads_for_claude" / "시스템구동서버앱.md"),
+        ("GLOBAL_MEMORY.md", home / ".gccslim/memory" / "GLOBAL_MEMORY.md"),
+        ("system-apps.md", home / ".gccslim/memory" / "system-apps.md"),
     ]:
         if label is None or path is None:
             continue
@@ -1231,13 +1231,13 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
     payload_files = []
     payload_files.append(file_node(
         "GLOBAL_MEMORY.md",
-        home / "beads_for_claude" / "GLOBAL_MEMORY.md",
+        home / ".gccslim/memory" / "GLOBAL_MEMORY.md",
         "매 세션 시작",
         "SessionStart hook 이 cat → 컨텍스트 주입",
     ))
     payload_files.append(file_node(
-        "시스템구동서버앱.md",
-        home / "beads_for_claude" / "시스템구동서버앱.md",
+        "system-apps.md",
+        home / ".gccslim/memory" / "system-apps.md",
         "참조용",
         "CLAUDE.md 가 link, 모델이 필요 시 read",
     ))

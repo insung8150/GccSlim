@@ -719,7 +719,8 @@ class SettingsScreen(ModalScreen[None]):
         Binding("2", "switch_tab('slim')", "슬림 탭", show=False),
         Binding("3", "switch_tab('archive')", "병합 탭", show=False),
         Binding("4", "switch_tab('editor')", "편집기 탭", show=False),
-        Binding("5", "switch_tab('help')", "도움말 탭", show=False),
+        Binding("5", "switch_tab('advisor')", "권고 설치 탭", show=False),
+        Binding("6", "switch_tab('help')", "도움말 탭", show=False),
     ]
 
     def __init__(self) -> None:
@@ -771,6 +772,7 @@ class SettingsScreen(ModalScreen[None]):
                 yield Button("🔻 슬림", id="tab-slim", classes="settings-tab")
                 yield Button("🗂 병합", id="tab-archive", classes="settings-tab")
                 yield Button("📝 편집기", id="tab-editor", classes="settings-tab")
+                yield Button("🪴 권고 설치", id="tab-advisor", classes="settings-tab")
                 yield Button("❓ 도움말", id="tab-help", classes="settings-tab")
 
             # ── 본문 — 탭별 viewport (공통 부모 스크롤 금지) ────────
@@ -1275,6 +1277,29 @@ class SettingsScreen(ModalScreen[None]):
                             classes="settings-reset-btn",
                         )
 
+                # ─── 권고 설치 pane ────────────────────────────────
+                # 5개 카드 (cleanup / stale / Claude /slim / Codex / dingdong).
+                # 자동 안내 모달을 dismiss 하거나 놓친 사용자가 언제든
+                # 재방문/재설치 할 수 있는 진입점.
+                # 카드 본문은 SelectableTextArea — 마우스 드래그로 선택/복사 가능.
+                with VerticalScroll(id="pane-advisor", classes="settings-pane settings-pane-scroll"):
+                    yield Static(
+                        "[b]🪴 권고 설치[/]  [dim]· Claude · Codex · 알림음 통합[/]",
+                        classes="settings-pane-title", markup=True,
+                    )
+                    yield SelectableTextArea(
+                        "GccSlim 외부 통합 — 첫 실행 시 자동 안내 모달이 한 번씩 뜹니다. "
+                        "놓치거나 나중에 켜고 싶을 때 여기서 다시 설치할 수 있습니다.",
+                        id="advisor-intro",
+                        classes="settings-select-text advisor-intro-text",
+                        read_only=True,
+                        soft_wrap=True,
+                        compact=True,
+                        show_line_numbers=False,
+                        highlight_cursor_line=True,
+                    )
+                    yield Vertical(id="advisor-cards-host")
+
                 # ─── 도움말 pane ──────────────────────────────────
                 with Vertical(id="pane-help", classes="settings-pane"):
                     yield Static(
@@ -1305,6 +1330,16 @@ class SettingsScreen(ModalScreen[None]):
         self._apply_slim_subtab_visibility()
         try:
             self.query_one("#tab-search", Button).focus()
+        except Exception:
+            pass
+        # 권고 탭 — intro/cards-host 의 height 를 콘텐츠에 맞춰 auto
+        # (그래야 #pane-advisor VerticalScroll 이 정상 스크롤됨).
+        try:
+            self.query_one("#advisor-intro").styles.height = "auto"
+        except Exception:
+            pass
+        try:
+            self.query_one("#advisor-cards-host", Vertical).styles.height = "auto"
         except Exception:
             pass
         self._refresh_status()
@@ -1382,6 +1417,9 @@ class SettingsScreen(ModalScreen[None]):
         if bid.startswith("btn-reset-"):
             self._reset_section(bid[len("btn-reset-"):])
             return
+        if bid.startswith("advisor-"):
+            self._handle_advisor_action(bid[len("advisor-"):])
+            return
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -1391,13 +1429,15 @@ class SettingsScreen(ModalScreen[None]):
 
     # ─── 탭 전환 ────────────────────────────────────────────────────
     def _select_tab(self, tab: str) -> None:
-        if tab not in ("search", "slim", "archive", "editor", "help"):
+        if tab not in ("search", "slim", "archive", "editor", "advisor", "help"):
             return
         self._active_tab = tab
         self._apply_tab_visibility()
+        if tab == "advisor":
+            self._refresh_advisor_cards()
 
     def _apply_tab_visibility(self) -> None:
-        for tab in ("search", "slim", "archive", "editor", "help"):
+        for tab in ("search", "slim", "archive", "editor", "advisor", "help"):
             try:
                 pane = self.query_one(f"#pane-{tab}")
                 pane.display = (tab == self._active_tab)
@@ -1773,6 +1813,253 @@ class SettingsScreen(ModalScreen[None]):
             self.notify(f"↻ '{title}' — {reset_count}개 디폴트 복원")
         else:
             self.notify(f"이미 '{title}' 디폴트 상태", severity="information")
+
+    # ─── 권고 설치 탭 — 카드 렌더링 + 핸들러 ─────────────────────────
+    def _refresh_advisor_cards(self) -> None:
+        """advisor 탭 진입/조작 후 카드 5개를 재렌더링.
+
+        각 카드의 본문 텍스트는 SelectableTextArea (도움말 탭과 동일 패턴)
+        로 그려서 마우스 좌클릭 드래그로 선택 / 복사할 수 있게 한다.
+        TextArea 는 Rich markup 을 해석하지 않으므로 plain text 만 사용.
+        """
+        try:
+            host = self.query_one("#advisor-cards-host", Vertical)
+        except Exception:
+            return
+        from gccfork import SelectableTextArea
+        # 기존 자식 모두 제거 — 빠르게 재구성
+        for child in list(host.children):
+            try:
+                child.remove()
+            except Exception:
+                pass
+        try:
+            from gccfork_install_advisor import install_status_summary
+            snap = install_status_summary()
+        except Exception as exc:
+            host.mount(Static(
+                f"[dim]권고 상태를 읽지 못했습니다: {exc}[/]",
+                classes="settings-intro", markup=True,
+            ))
+            return
+
+        def _badge(installed: bool, dismissed: bool, blocked: str = "") -> str:
+            # plain text — TextArea 에는 markup 없음
+            if blocked:
+                return f"· {blocked}"
+            if installed:
+                return "✓ 설치됨"
+            if dismissed:
+                return "· 사용자가 안 보이기 처리"
+            return "· 미설치"
+
+        def _mount_card(text: str) -> None:
+            """카드 본문 텍스트를 SelectableTextArea 로 mount.
+
+            ID 는 부여하지 않는다 — `_refresh_advisor_cards()` 가 빠르게 연속
+            호출될 때 textual 의 `remove()` 가 비동기라 같은 ID 가 잠시
+            공존하면 DuplicateIds 예외가 발생한다. 카드는 식별 안 해도 됨.
+
+            height 는 `auto` 강제 — TextArea 기본값은 짧아서 본문이 잘림.
+            """
+            ta = SelectableTextArea(
+                text,
+                classes="settings-select-text advisor-card-text",
+                read_only=True,
+                soft_wrap=True,
+                compact=True,
+                show_line_numbers=False,
+                highlight_cursor_line=True,
+            )
+            ta.styles.height = "auto"
+            host.mount(ta)
+
+        # 1) cleanup — 현재값 / 권고값 + 짧으면 변경 버튼
+        try:
+            from gccfork_cleanup_check import (
+                read_cleanup_period_days, RECOMMENDED_DAYS, DEFAULT_DAYS,
+            )
+            cur = read_cleanup_period_days()
+            effective = DEFAULT_DAYS if cur is None else cur
+            cur_s = f"(미설정 → {DEFAULT_DAYS}일)" if cur is None else f"{cur}일"
+            _mount_card(
+                f"🧹 cleanupPeriodDays\n"
+                f"현재: {cur_s}\n"
+                f"권고: {RECOMMENDED_DAYS}일",
+            )
+            row = Horizontal(classes="settings-section-actions")
+            host.mount(row)
+            if effective < RECOMMENDED_DAYS:
+                row.mount(Button(
+                    f"권고값({RECOMMENDED_DAYS})으로 변경",
+                    id="advisor-cleanup-apply",
+                    variant="primary",
+                ))
+            else:
+                noop_btn = Button("✓ 이미 권고 이상")
+                noop_btn.disabled = True
+                row.mount(noop_btn)
+        except Exception as exc:
+            _mount_card(f"🧹 cleanupPeriodDays\n읽기 실패: {exc}")
+
+        # 2) stale — 옛 TUI 검출 결과만
+        try:
+            from gccfork import _find_other_gccfork_tuis  # type: ignore[attr-defined]
+            stale = [i for i in (_find_other_gccfork_tuis() or []) if i.get("is_old")]
+            n = len(stale)
+            _mount_card(f"🪦 옛 TUI 인스턴스\n검출: {n}개")
+        except Exception:
+            _mount_card("🪦 옛 TUI 인스턴스\n검사 미가용")
+
+        # 3) Claude /slim
+        cs = snap.get("claude_slash", {})
+        cs_badge = _badge(cs.get("installed", False), cs.get("dismissed", False))
+        cs_lines = [
+            f"🔻 Claude `/slim` 통합   {cs_badge}",
+            "─────────────────────────",
+            "Claude 안에서 `/slim`, `/slim:dry` 입력 → UserPromptSubmit hook 이 "
+            "TUI 에 위임합니다.",
+            "",
+            "검사 항목:",
+        ]
+        for label, target, ok in cs.get("details", []):
+            mark = "✓" if ok else "✗"
+            cs_lines.append(f"  {mark} {label}")
+            cs_lines.append(f"      {target}")
+        _mount_card("\n".join(cs_lines))
+        row = Horizontal(classes="settings-section-actions")
+        host.mount(row)
+        if cs.get("installed", False):
+            row.mount(Button("제거", id="advisor-claude-slash-remove", classes="settings-reset-btn"))
+        else:
+            row.mount(Button("설치", id="advisor-claude-slash-install", variant="primary"))
+
+        # 4) Codex /slim integration
+        cw = snap.get("codex_wrapper", {})
+        cw_available = cw.get("available", False)
+        cw_installed = bool(cw.get("installed", False))
+        cw_block = "" if (cw_installed or cw_available) else "자동 설치 자산 없음"
+        cw_badge = _badge(cw.get("installed", False), cw.get("dismissed", False), cw_block)
+        cw_lines = [
+            f"🔻 Codex `/slim` 통합   {cw_badge}",
+            "─────────────────────────",
+            "Codex TUI 안의 `/slim` 명령이 codex-slim-now 를 호출하고,",
+            "wrapper/loop 가 slim 후 같은 터미널에서 재시작하도록 연결합니다.",
+            "",
+            "검사 항목:",
+        ]
+        for label, target, ok in cw.get("details", []):
+            mark = "✓" if ok else "✗"
+            cw_lines.append(f"  {mark} {label}")
+            cw_lines.append(f"      {target}")
+        _mount_card("\n".join(cw_lines))
+        row = Horizontal(classes="settings-section-actions")
+        host.mount(row)
+        if cw_installed:
+            row.mount(Button("제거", id="advisor-codex-wrapper-remove", classes="settings-reset-btn"))
+        else:
+            btn = Button("설치", id="advisor-codex-wrapper-install", variant="primary")
+            btn.disabled = not cw_available
+            row.mount(btn)
+
+        # 5) Claude dingdong
+        dd = snap.get("dingdong", {})
+        # deps_reason 은 카드 본문에 details 와 함께 표시 (badge 는 깔끔하게 유지)
+        dd_badge = _badge(dd.get("installed", False), dd.get("dismissed", False))
+        dd_lines = [
+            f"🔔 Claude 작업 완료 알림음 (Stop hook)   {dd_badge}",
+            "─────────────────────────",
+            "Claude 응답이 끝나면 솔–미–도 (~1.4 초) 알림음이 한 번 울립니다.",
+            "Linux 는 python3 + numpy + aplay, macOS 는 afplay 만 있으면 동작.",
+            "",
+            "검사 항목:",
+        ]
+        for label, target, ok in dd.get("details", []):
+            mark = "✓" if ok else "✗"
+            dd_lines.append(f"  {mark} {label}")
+            dd_lines.append(f"      {target}")
+        if not dd.get("deps_ok", False):
+            dd_lines.append("")
+            dd_lines.append(f"  ⚠ 의존성: {dd.get('deps_reason', '')}")
+        _mount_card("\n".join(dd_lines))
+        row = Horizontal(classes="settings-section-actions")
+        host.mount(row)
+        if dd.get("installed", False):
+            row.mount(Button("제거", id="advisor-dingdong-remove", classes="settings-reset-btn"))
+        else:
+            btn = Button("설치", id="advisor-dingdong-install", variant="primary")
+            btn.disabled = not dd.get("deps_ok", False)
+            row.mount(btn)
+
+        # 6) Codex dingdong
+        cdd = snap.get("codex_dingdong", {})
+        cdd_badge = _badge(cdd.get("installed", False), cdd.get("dismissed", False))
+        cdd_lines = [
+            f"🔔 Codex 작업 완료 알림음 (wrapper 감시)   {cdd_badge}",
+            "─────────────────────────",
+            "Codex 응답 끝에 JSONL task_complete 이벤트가 기록되면 같은 딩동댕을 울립니다.",
+            "Codex wrapper로 시작한 새 세션부터 적용됩니다.",
+            "",
+            "검사 항목:",
+        ]
+        for label, target, ok in cdd.get("details", []):
+            mark = "✓" if ok else "✗"
+            cdd_lines.append(f"  {mark} {label}")
+            cdd_lines.append(f"      {target}")
+        if not cdd.get("deps_ok", False):
+            cdd_lines.append("")
+            cdd_lines.append(f"  ⚠ 의존성: {cdd.get('deps_reason', '')}")
+        _mount_card("\n".join(cdd_lines))
+        row = Horizontal(classes="settings-section-actions")
+        host.mount(row)
+        if cdd.get("installed", False):
+            row.mount(Button("제거", id="advisor-codex-dingdong-remove", classes="settings-reset-btn"))
+        else:
+            btn = Button("설치", id="advisor-codex-dingdong-install", variant="primary")
+            btn.disabled = not cdd.get("deps_ok", False)
+            row.mount(btn)
+
+    def _handle_advisor_action(self, action: str) -> None:
+        """advisor 탭 카드 버튼 클릭 → install_advisor 함수 호출 + 재렌더링."""
+        from gccfork_install_advisor import (
+            apply_claude_slash_install, uninstall_claude_slash,
+            apply_codex_wrapper_install, uninstall_codex_wrapper,
+            apply_dingdong_install, uninstall_dingdong,
+            apply_codex_dingdong_install, uninstall_codex_dingdong,
+        )
+        ok, msg = (False, "")
+        if action == "cleanup-apply":
+            from gccfork_cleanup_check import update_cleanup_period_days, RECOMMENDED_DAYS
+            ok, info = update_cleanup_period_days(RECOMMENDED_DAYS)
+            msg = (
+                f"cleanupPeriodDays = {RECOMMENDED_DAYS}일 적용. {info}"
+                if ok else f"적용 실패: {info}"
+            )
+        elif action == "claude-slash-install":
+            ok, msg = apply_claude_slash_install()
+        elif action == "claude-slash-remove":
+            ok, msg = uninstall_claude_slash()
+        elif action == "codex-wrapper-install":
+            ok, msg = apply_codex_wrapper_install()
+        elif action == "codex-wrapper-remove":
+            ok, msg = uninstall_codex_wrapper()
+        elif action == "dingdong-install":
+            ok, msg = apply_dingdong_install()
+        elif action == "dingdong-remove":
+            ok, msg = uninstall_dingdong()
+        elif action == "codex-dingdong-install":
+            ok, msg = apply_codex_dingdong_install()
+        elif action == "codex-dingdong-remove":
+            ok, msg = uninstall_codex_dingdong()
+        else:
+            return
+        try:
+            status = self.query_one("#settings-status", Static)
+            prefix = "✓" if ok else "✗"
+            status.update(f"{prefix} {msg}")
+        except Exception:
+            pass
+        self._refresh_advisor_cards()
 
     def _refresh_status(self) -> None:
         """푸터 — 디폴트와 다른 prefs 개수 표시 (archive 옵션 포함)."""

@@ -1,5 +1,7 @@
 # GccSlim
 
+Current release: `v2026.05.19`
+
 GccSlim is a local session management and session-slimming distribution for Claude Code and Codex CLI workflows.
 
 This staging folder is a **binary distribution**, not the internal development source tree. Rust implementation sources, regression fixtures, private work logs, local session files, hostnames, IP addresses, and personal paths are intentionally excluded.
@@ -33,12 +35,23 @@ Direct slim command:
 gccslim-now
 ```
 
+Codex helper commands installed by this release:
+
+```bash
+codex-slim-loop
+codex-slim-now
+```
+
 ## Included
 
 - `bin/gccslim`: public TUI entrypoint.
 - `bin/gccslim-now`: direct slim wrapper for the active Claude session.
 - `bin/gccslim-slim`: platform-selecting slim wrapper.
 - `bin/gccslim-claude-patch`: platform-selecting Claude patch wrapper.
+- `bin/codex-slim-loop`: Codex same-terminal slim/restart wrapper.
+- `bin/codex-slim-now`: Codex active-session slim request helper.
+- `bin/gccfork_codex_slim_loop.py`: Codex wrapper loop sidecar.
+- `bin/gccfork_codex_slim_reload.py`: Codex JSONL slim plan/apply sidecar.
 - `bin/linux-x86_64/`: stripped Linux x86_64 Rust binaries.
 - `bin/macos-arm64/`: stripped macOS arm64 Rust binaries.
 - `bin/gccfork_*.py`: Python sidecar modules kept under compatibility names.

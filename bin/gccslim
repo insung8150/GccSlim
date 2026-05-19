@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "0.1.0"
+GCCFORK_VERSION = "2026.05.19"
 GCCFORK_WORKER = "Claude"
 
 
@@ -2239,6 +2239,7 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
         current_terminal: Optional[str] = None,
         allow_codex_open: bool = False,
         open_target_options: Optional[list[tuple[str, str, bool]]] = None,
+        sid_prefix: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.default_name = default_name
@@ -2256,6 +2257,10 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
         # current_terminal: 현재 gccfork가 돌고 있는 터미널. VSCode면 "탭/창" 구분이
         # 무의미(모두 패널 새 항목)하므로 그에 맞춰 📑 체크박스를 숨긴다.
         self.current_terminal = current_terminal
+        # sid_prefix: 신규/하드분기처럼 spawn 전부터 sid 가 결정된 케이스 —
+        # input 왼쪽에 readonly 4자 prefix 표시. _result() 가 결과 name 앞에
+        # 자동으로 "<prefix> " 를 prepend 한다 (사용자는 뒤만 수정).
+        self.sid_prefix = sid_prefix
 
     def _effective_target(self) -> Optional[str]:
         """현재 체크박스 상태 기준 최종 대상 터미널."""
@@ -2300,7 +2305,17 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
                         "[b][NAME][/] 세션 이름",
                         classes="fkn-section-title", markup=True,
                     )
-                    yield Input(value=self.default_name, id="forkname-input")
+                    if self.sid_prefix:
+                        # sid 4자가 이미 박힌 케이스 — 왼쪽 readonly [XXXX] + 편집 input
+                        # 관례: 대괄호 + 대문자 hex (예: [9C64])
+                        with Horizontal(id="forkname-input-row"):
+                            yield Static(
+                                f"[{self.sid_prefix.upper()}]  ",
+                                id="forkname-sid-prefix", markup=False,
+                            )
+                            yield Input(value=self.default_name, id="forkname-input")
+                    else:
+                        yield Input(value=self.default_name, id="forkname-input")
 
                 # ─── [OPTION] 옵션 ─────────────────────────────────
                 # 순서: [🔁 대체 환경으로 보내기] → [📑 새 탭으로 열기]
@@ -2386,8 +2401,15 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
         return self.open_target_options[0][0]
 
     def _result(self, name: str) -> None:
+        final_name = name.strip()
+        if self.sid_prefix:
+            # 관례: [XXXX] 대괄호 + 대문자 형태로 결과 앞에 자동 prepend.
+            # 사용자가 실수로 prefix 까지 입력해도 중복 방지.
+            bracket_prefix = f"[{self.sid_prefix.upper()}]"
+            if not final_name.startswith(bracket_prefix):
+                final_name = f"{bracket_prefix} {final_name}".strip()
         self.dismiss({
-            "name": name.strip(),
+            "name": final_name,
             "spawn_mode": self._current_spawn_mode(),
             "target_terminal": self._current_target_terminal(),
             "open_target": self._current_open_target(),
@@ -6180,7 +6202,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
     }
     /* 이름 입력 — 슬림 #slim-name-input 과 완전 동일 (color 직접지정 X) */
     #forkname-input {
-        width: 100%;
+        width: 1fr;
         height: 3;
         background: $accent 5%;
         border: round $accent 20%;
@@ -6189,6 +6211,21 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
     #forkname-input:focus {
         background: $accent 10%;
         border: round $accent;
+    }
+    /* sid prefix 가 있는 신규/하드분기 케이스 — 왼쪽 readonly 4자 + 편집 input */
+    #forkname-input-row {
+        height: 3;
+        width: 100%;
+        layout: horizontal;
+        margin: 0;
+    }
+    #forkname-sid-prefix {
+        width: auto;
+        height: 3;
+        padding: 1 1 0 1;
+        background: transparent;
+        color: $accent;
+        text-style: bold;
     }
     /* 체크박스 — 4단계 ($accent 사다리만 사용, 직접 색 금지) */
     #forkname-newtab, #forkname-other-env {
@@ -6829,10 +6866,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
     def _reconcile_pending_new_roots(self, newly_added: set[str]) -> None:
         """신규 루트 세션 보류 → 새로 생긴 jsonl 중 parent 가 없는 것에 이름 부여.
 
-        매칭 휴리스틱:
-          - 새 세션의 parent_id 가 None (= root)
-          - 새 세션의 cwd 가 보류 entry 의 cwd 와 일치
-          - 보류 생성 시각으로부터 5분 이내
+        매칭 우선순위:
+          1. **sid 직매칭** (--session-id 로 우리가 미리 박은 케이스, 100% 정확)
+          2. cwd+timing 휴리스틱 (옛 claude 폴백 — claude 가 자체 sid 생성)
         """
         if not newly_added:
             return
@@ -6847,9 +6883,27 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             new_sess = find_session_by_id(new_id)
             if not new_sess or new_sess.parent_id:
                 continue
+
+            # 1. sid 직매칭 우선
+            sid_idx: Optional[int] = None
+            for idx, pending in enumerate(self._pending_new_roots):
+                if pending.get("sid") == new_id:
+                    sid_idx = idx
+                    break
+            if sid_idx is not None:
+                entry = self._pending_new_roots.pop(sid_idx)
+                name = entry.get("name") or f"새 세션 {new_sess.short_id}"
+                registry_set(new_id, name=name)
+                self.notify(f"✨ 신규 루트 등록: {new_sess.short_id}  ({name[:30]})")
+                continue
+
+            # 2. cwd+timing 휴리스틱 (--session-id 미지원 claude 폴백)
             best_idx: Optional[int] = None
             best_delta = float("inf")
             for idx, pending in enumerate(self._pending_new_roots):
+                if pending.get("sid"):
+                    # sid 가 있는데 위에서 안 잡혔다는 건 다른 신규 — 폴백 매칭 대상 아님
+                    continue
                 if pending.get("cwd") and new_sess.cwd and pending["cwd"] != new_sess.cwd:
                     continue
                 delta = now - pending["created_at"]
@@ -10755,12 +10809,21 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         )
 
     def action_new_root(self) -> None:
-        """✨ 신규 루트 세션 — 이름 모달 → 새 터미널에 `claude` (no --resume).
+        """✨ 신규 루트 세션 — 이름 모달 → 새 터미널에 `claude --session-id <uuid>`.
 
-        claude 가 새 session UUID 생성 후 jsonl 작성 → auto-reload 가 감지 →
-        _reconcile_pending_new_roots 가 cwd+timing 매칭으로 사용자 지정 이름 등록.
+        하드 분기와 동일 패턴: gccfork 가 spawn 전부터 sid 를 미리 결정해서
+        `claude --session-id <new_uuid>` 로 박는다. 이름 모달엔 sid 첫 4자가
+        prefix 로 표시됨 (사용자는 뒤만 수정). claude 가 옛 버전이라
+        --session-id 미지원이면 폴백 (UUID 우리 못 박음, cwd+timing 휴리스틱).
         """
-        # 기본 이름 — 시각 기반 placeholder
+        # spawn 전 sid 미리 생성 — claude --session-id 로 강제. 옛 claude 면
+        # 옵션 detection 실패 시 폴백 (이 경우 sid 는 claude 가 자체 생성).
+        supports_sid = _claude_supports_session_id_option()
+        new_uuid: Optional[str] = str(uuid_lib.uuid4()) if supports_sid else None
+        sid_prefix = new_uuid[:4] if new_uuid else None
+
+        # 기본 이름 — Claude 가 sid 박을 케이스면 시각만 (4자는 모달의 prefix 로 분리).
+        # 미지원 폴백이면 옛 패턴 그대로 (시각 기반 default).
         default_name = f"새 세션 {datetime.now().strftime('%m-%d %H:%M')}"
         current_terminal = _detect_terminal()
         other_env = _other_environment(current_terminal)
@@ -10789,19 +10852,20 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
                 )
                 return
 
-            # 보류 등록 — 새 jsonl 이 cwd+timing 으로 매칭되면 이 이름 부여됨
+            # 보류 등록 — sid 있으면 직매칭, 없으면 cwd+timing 휴리스틱
             self._pending_new_roots.append({
                 "name": name,
                 "cwd": normalize_cwd(cwd),
                 "created_at": time.time(),
+                "sid": new_uuid,  # None 이면 폴백 매칭
             })
 
-            # 새 터미널에 `claude` spawn (resume 없음). 이름은 터미널 제목/registry로 보존.
             self._launch_claude_new_root(
                 name=name,
                 cwd=cwd,
                 spawn_mode=spawn_mode,
                 target_terminal=target_terminal,
+                session_id=new_uuid,
             )
 
         self.push_screen(
@@ -10810,6 +10874,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
                 title="✨ 새 세션 — 대상 / 이름 지정",
                 other_env=other_env,
                 current_terminal=current_terminal,
+                sid_prefix=sid_prefix,
                 open_target_options=[
                     ("claude", "Claude 새 세션", True),
                     ("codex", "Codex 새 세션", False),
@@ -10824,26 +10889,137 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         cwd: str,
         spawn_mode: str = "window",
         target_terminal: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> None:
-        """`claude` (no --resume) 새 터미널에 spawn."""
+        """`claude` (no --resume) 새 터미널에 spawn.
+
+        session_id 있으면 `claude --session-id <uuid>` 로 sid 미리 결정 (하드
+        분기와 동일 패턴). 없으면 claude 가 자체 생성.
+
+        VSCode 대상 + bridge 인스턴스 2개 이상이면 BridgeTargetPickerScreen
+        으로 사용자 선택받음 (fork/resume 의 _launch_claude_new_terminal 과
+        동일 라우팅). picker 없으면 _preferred_vscode_session_id() 폴백으로
+        focused VSCode 자동 선택되어 사용자 의도와 다른 창으로 갈 수 있음.
+        """
         env = _sanitize_env_for_claude()
         env["GCCFORK_PENDING_NEW_ROOT_NAME"] = name
         cmd = ["claude"]
+        _add_claude_session_id_if_supported(cmd, session_id)
         _add_claude_name_if_supported(cmd, name[:80])
-        # spawn 표시용 색상 — 신규 세션은 아직 session.id 가 없으니 기본 흰 점 정도
-        # 실제 색은 세션 등록 후 _set_root_color_map 이 자동 배정
-        terminal = target_terminal or _detect_terminal()
-        ok, used = _spawn_claude_in_new_terminal(
-            terminal, cmd, cwd, env, name, spawn_mode, color_tag=None,
-        )
-        mode_label = "🪟 새 창" if spawn_mode == "window" else "📑 새 탭"
-        if ok:
-            if used == "vscode-bridge":
-                self.notify(f"✓ VSCode 새 터미널 생성 (신규 세션: {name[:30]})")
-            else:
-                self.notify(f"✓ {used} 에 새 claude 세션 시작 ({mode_label})")
+
+        effective_target = target_terminal or _detect_terminal()
+        # sid 미리 결정된 케이스 — fork/resume 처럼 sha256 기반 12색 결정.
+        # color_tag = VSCode 패널 자체 ThemeColor (bridge payload colorTag)
+        # tab_title = 탭 이름 앞 색상 이모지 (gccfork 세션리스트와 동일 12색)
+        if session_id:
+            color_tag = _vscode_terminal_color_for_session(session_id)
+            color_emoji = _color_for_session(session_id)
+            tab_title = f"{color_emoji} {name}"[:80]
         else:
-            self.notify(f"새 터미널 spawn 실패 ({used})", severity="error")
+            color_tag = None
+            tab_title = name
+
+        def _do_spawn(pinned_sid: Optional[str] = None) -> None:
+            global _pinned_vscode_target_sid
+            old_pin = _pinned_vscode_target_sid
+            if pinned_sid:
+                _pinned_vscode_target_sid = pinned_sid
+            try:
+                ok, used = _spawn_claude_in_new_terminal(
+                    effective_target, cmd, cwd, env, tab_title, spawn_mode, color_tag=color_tag,
+                )
+            finally:
+                _pinned_vscode_target_sid = old_pin
+            mode_label = "🪟 새 창" if spawn_mode == "window" else "📑 새 탭"
+            if ok:
+                if used == "vscode-bridge":
+                    self.notify(f"✓ VSCode 새 터미널 생성 (신규 세션: {name[:30]})")
+                else:
+                    self.notify(f"✓ {used} 에 새 claude 세션 시작 ({mode_label})")
+            else:
+                self.notify(f"새 터미널 spawn 실패 ({used})", severity="error")
+
+        if effective_target != "vscode":
+            _do_spawn()
+            return
+
+        # VSCode 라우팅 6단계 — _launch_claude_new_terminal 과 동일
+        matches = _find_vscode_for_cwd(cwd) if cwd else []
+        all_insts = _bridge_instances()
+
+        # 1. 다중 인스턴스 → 무조건 picker
+        if len(all_insts) >= 2:
+            def _on_pick_strict(picked_sid: Optional[str]) -> None:
+                if not picked_sid:
+                    return
+                _do_spawn(pinned_sid=picked_sid)
+            self.push_screen(
+                BridgeTargetPickerScreen(all_insts, session_cwd=cwd),
+                _on_pick_strict,
+            )
+            return
+
+        # 2. focused / self-host 1개 → 자동
+        focused_sid = _focused_vscode_session_id() or _self_hosting_vscode_session_id()
+        if focused_sid:
+            _do_spawn(pinned_sid=focused_sid)
+            return
+
+        # 3. cwd 매치 1개 → 자동
+        if len(matches) == 1:
+            _do_spawn(pinned_sid=matches[0].get("sessionId"))
+            return
+
+        # 4. cwd 매치 다중 → picker
+        if len(matches) > 1:
+            def _on_pick_multi(picked_sid: Optional[str]) -> None:
+                if not picked_sid:
+                    return
+                _do_spawn(pinned_sid=picked_sid)
+            self.push_screen(
+                BridgeTargetPickerScreen(matches, session_cwd=cwd),
+                _on_pick_multi,
+            )
+            return
+
+        # 5. 매치 0 + cwd 있음 → 새 VSCode 창 열기 확인
+        if cwd:
+            def _on_open_confirm(decision: Optional[bool]) -> None:
+                if not decision:
+                    return
+                self.notify(f"📂 VSCode 창 여는 중… ({cwd})", timeout=15)
+
+                def _bg() -> None:
+                    new_sid = _open_vscode_for_cwd(cwd)
+                    if new_sid:
+                        self.call_from_thread(_do_spawn, new_sid)
+                    else:
+                        self.call_from_thread(
+                            self.notify,
+                            "VSCode 창 열기 실패 — `code` CLI 가 PATH 에 없거나 bridge 응답 없음",
+                            severity="error",
+                        )
+
+                threading.Thread(target=_bg, daemon=True).start()
+
+            self.push_screen(OpenWorkspaceConfirmScreen(cwd), _on_open_confirm)
+            return
+
+        # 6. cwd 없음 폴백 — 살아있는 인스턴스 picker
+        insts = _bridge_instances()
+        self_sid = _self_hosting_vscode_session_id()
+        if len(insts) > 1 and not self_sid:
+            def _on_pick_fb(picked_sid: Optional[str]) -> None:
+                if not picked_sid:
+                    return
+                _do_spawn(pinned_sid=picked_sid)
+            self.push_screen(
+                BridgeTargetPickerScreen(insts, session_cwd=cwd),
+                _on_pick_fb,
+            )
+            return
+
+        _do_spawn()
 
     def action_rename(self) -> None:
         session = self.selected_session()
@@ -12200,6 +12376,41 @@ def _claude_supports_name_option() -> bool:
 def _add_claude_name_if_supported(cmd: list[str], display_name: Optional[str]) -> None:
     if display_name and _claude_supports_name_option():
         cmd.extend(["--name", display_name[:80]])
+
+
+_CLAUDE_SESSION_ID_SUPPORT: Optional[bool] = None
+
+
+def _claude_supports_session_id_option() -> bool:
+    """Return whether the installed Claude CLI accepts --session-id <uuid>.
+
+    옛 Claude 빌드엔 없을 수 있어 detection 후 미지원 시 폴백 (claude 가 자체
+    UUID 생성). 결과는 프로세스 lifetime 캐시.
+    """
+    global _CLAUDE_SESSION_ID_SUPPORT
+    if _CLAUDE_SESSION_ID_SUPPORT is not None:
+        return _CLAUDE_SESSION_ID_SUPPORT
+    if not shutil.which("claude"):
+        _CLAUDE_SESSION_ID_SUPPORT = False
+        return False
+    try:
+        res = subprocess.run(
+            ["claude", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        help_text = f"{res.stdout}\n{res.stderr}"
+        _CLAUDE_SESSION_ID_SUPPORT = "--session-id" in help_text
+    except Exception:
+        _CLAUDE_SESSION_ID_SUPPORT = False
+    return _CLAUDE_SESSION_ID_SUPPORT
+
+
+def _add_claude_session_id_if_supported(cmd: list[str], session_id: Optional[str]) -> None:
+    if session_id and _claude_supports_session_id_option():
+        cmd.extend(["--session-id", session_id])
 
 
 def _build_claude_cmd(action: str, session: Session, display_name: str) -> list[str]:

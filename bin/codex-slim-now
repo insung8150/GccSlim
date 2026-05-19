@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from gccfork_codex_slim_loop import main_now
+
+
+if __name__ == "__main__":
+    raise SystemExit(main_now())
