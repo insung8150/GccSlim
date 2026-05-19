@@ -768,12 +768,12 @@ class SettingsScreen(ModalScreen[None]):
 
             # ── 탭바 ───────────────────────────────────────────────
             with Horizontal(id="settings-tabs"):
-                yield Button("🔬 검색", id="tab-search", classes="settings-tab -active")
-                yield Button("🔻 슬림", id="tab-slim", classes="settings-tab")
-                yield Button("🗂 병합", id="tab-archive", classes="settings-tab")
-                yield Button("📝 편집기", id="tab-editor", classes="settings-tab")
-                yield Button("🪴 권고 설치", id="tab-advisor", classes="settings-tab")
-                yield Button("❓ 도움말", id="tab-help", classes="settings-tab")
+                yield Button("검색", id="tab-search", classes="settings-tab -active")
+                yield Button("슬림", id="tab-slim", classes="settings-tab")
+                yield Button("병합", id="tab-archive", classes="settings-tab")
+                yield Button("편집", id="tab-editor", classes="settings-tab")
+                yield Button("권고", id="tab-advisor", classes="settings-tab")
+                yield Button("도움", id="tab-help", classes="settings-tab")
 
             # ── 본문 — 탭별 viewport (공통 부모 스크롤 금지) ────────
             with Vertical(id="settings-content"):
@@ -1153,10 +1153,13 @@ class SettingsScreen(ModalScreen[None]):
 
                 # ─── 🗂 병합 pane — 진짜 RadioSet/Checkbox UI ────────
                 with VerticalScroll(id="pane-archive", classes="settings-pane settings-pane-scroll"):
-                    yield Static(
-                        "[b]🗂 Archive (병합) — 옵션 10개[/]",
-                        classes="settings-pane-title", markup=True,
-                    )
+                    with Horizontal(classes="settings-pane-head"):
+                        yield Static(
+                            "[b]🗂 Archive (병합) — 옵션 10개[/]",
+                            classes="settings-pane-title", markup=True,
+                        )
+                        yield Static("", classes="settings-spacer")
+                        yield SettingsBrainButton("archive")
                     yield SelectableTextArea(
                         _archive_options_text(),
                         id="settings-archive-copy",
@@ -1600,8 +1603,72 @@ class SettingsScreen(ModalScreen[None]):
             "이 설정이 슬림 버튼 모달의 기본 선택값과 어떻게 연결되는지 간결하게 설명해줘."
         )
 
+    def _archive_settings_system_prompt(self) -> str:
+        return (
+            "당신은 GccSlim 설정 화면의 병합 탭 해설 전용 지능 에이전트입니다.\n"
+            "목표는 사용자가 Archive/병합 설정이 실제 세션 병합, 미리보기, 검색, 복원에 어떤 영향을 주는지 바로 이해하도록 돕는 것입니다.\n"
+            "GccSlim 병합의 기본 개념:\n"
+            "- 병합은 공통 조상을 가진 여러 세션을 새 통합 세션으로 만드는 기능입니다.\n"
+            "- archive 옵션은 병합 전후의 자식 세션 표시, 검색 포함, 복원 정책, 저장 위치를 제어합니다.\n"
+            "- merge stitching 방식은 병합 결과 JSONL에서 여러 세션 흐름을 어떤 형태로 엮을지 정합니다.\n"
+            "주요 옵션 의미:\n"
+            "- preview_mode: 부모/병합 세션 미리보기에서 archive 자식 내용을 어떻게 보여줄지 정합니다.\n"
+            "- search_includes_children: deep search 때 archive 자식 본문까지 검색할지 정합니다.\n"
+            "- important_handling: ★ 표시된 세션을 archive/병합할 때 자동 포함, 확인, 거부 중 하나를 적용합니다.\n"
+            "- restore_enabled: archive 된 세션을 되돌릴 수 있는지, 휴지통 패턴으로 보존할지 정합니다.\n"
+            "- trigger_mode: 병합 진입점을 단축키, 버튼, 둘 다 중 어디로 노출할지 정합니다.\n"
+            "- lazy_load: 자식 본문을 필요할 때만 읽어 큰 세션 목록의 부담을 줄입니다.\n"
+            "- child_color_distinction: archive 자식별 시각 구분을 적용합니다.\n"
+            "- section_header_format: 자식 섹션 헤더를 간단히 또는 자세히 표시합니다.\n"
+            "- child_sort_order: archive 자식 정렬 기준입니다.\n"
+            "- folder_layout: archive 저장 위치를 프로젝트별 또는 중앙 폴더로 정합니다.\n"
+            "- merge_stitching_method: 병합 결과의 대화 엮기 방식입니다.\n"
+            "설명 규칙:\n"
+            "- 한국어로 답합니다.\n"
+            "- 현재 설정값만 근거로 설명합니다.\n"
+            "- 사용자가 어떤 값을 유지하거나 바꾸면 좋은지 마지막에 한 줄로 제안합니다.\n"
+            "- 내부 파일 경로나 구현 세부 함수명보다 사용자에게 보이는 효과 중심으로 설명합니다."
+        )
+
+    def _archive_settings_user_prompt(self) -> str:
+        from gccfork import pref_get
+        try:
+            from gccfork_archive import ARCHIVE_DEFAULTS
+        except ImportError:
+            ARCHIVE_DEFAULTS = {}
+        try:
+            from gccfork_merge import MERGE_DEFAULTS
+        except ImportError:
+            MERGE_DEFAULTS = {}
+        defaults = {**ARCHIVE_DEFAULTS, **MERGE_DEFAULTS}
+        values = {}
+        for opt in ARCHIVE_OPTIONS:
+            key = opt["key"]
+            default = defaults.get(key)
+            values[key] = {
+                "label": opt.get("label", key),
+                "kind": opt.get("kind", ""),
+                "current": pref_get(key, default),
+                "default": default,
+                "hint": opt.get("hint", ""),
+            }
+        return (
+            "GccSlim 설정 화면의 병합 탭 상태를 사용자에게 설명해줘.\n\n"
+            "[현재 병합/Archive 설정]\n"
+            f"{json.dumps(values, ensure_ascii=False, indent=2)}\n\n"
+            "각 설정이 실제 병합, 미리보기, 검색, 복원 흐름에 어떤 영향을 주는지 간결하게 설명해줘."
+        )
+
     def _open_settings_brain_agent(self, target: str) -> None:
-        if target != "slim":
+        if target == "slim":
+            source_key = "settings-slim"
+            system_prompt = self._slim_settings_system_prompt()
+            user_prompt = self._slim_settings_user_prompt()
+        elif target == "archive":
+            source_key = "settings-archive"
+            system_prompt = self._archive_settings_system_prompt()
+            user_prompt = self._archive_settings_user_prompt()
+        else:
             return
         app = self.app
         if not hasattr(app, "_spawn_settings_brain_agent"):
@@ -1611,9 +1678,9 @@ class SettingsScreen(ModalScreen[None]):
                 pass
             return
         app._spawn_settings_brain_agent(
-            source_key="settings-slim",
-            system_prompt=self._slim_settings_system_prompt(),
-            user_prompt=self._slim_settings_user_prompt(),
+            source_key=source_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
 
     # ─── helpers ────────────────────────────────────────────────────
