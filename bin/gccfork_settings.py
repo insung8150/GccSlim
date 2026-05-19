@@ -1284,12 +1284,12 @@ class SettingsScreen(ModalScreen[None]):
                 # 카드 본문은 SelectableTextArea — 마우스 드래그로 선택/복사 가능.
                 with VerticalScroll(id="pane-advisor", classes="settings-pane settings-pane-scroll"):
                     yield Static(
-                        "[b]🪴 권고 설치[/]  [dim]· Claude · Codex · 알림음 통합[/]",
+                        "[b]🪴 권고 설치 옵션[/]  [dim]· Claude · Codex · 알림음[/]",
                         classes="settings-pane-title", markup=True,
                     )
                     yield SelectableTextArea(
-                        "GccSlim 외부 통합 — 첫 실행 시 자동 안내 모달이 한 번씩 뜹니다. "
-                        "놓치거나 나중에 켜고 싶을 때 여기서 다시 설치할 수 있습니다.",
+                        "권고 설치 옵션입니다. 내부 검사는 자동으로 처리하며, "
+                        "필요한 항목만 설치하거나 제거할 수 있습니다.",
                         id="advisor-intro",
                         classes="settings-select-text advisor-intro-text",
                         read_only=True,
@@ -1916,16 +1916,8 @@ class SettingsScreen(ModalScreen[None]):
         cs_badge = _badge(cs.get("installed", False), cs.get("dismissed", False))
         cs_lines = [
             f"🔻 Claude `/slim` 통합   {cs_badge}",
-            "─────────────────────────",
-            "Claude 안에서 `/slim`, `/slim:dry` 입력 → UserPromptSubmit hook 이 "
-            "TUI 에 위임합니다.",
-            "",
-            "검사 항목:",
+            "Claude 안에서 `/slim`, `/slim:dry`를 GccSlim으로 연결합니다.",
         ]
-        for label, target, ok in cs.get("details", []):
-            mark = "✓" if ok else "✗"
-            cs_lines.append(f"  {mark} {label}")
-            cs_lines.append(f"      {target}")
         _mount_card("\n".join(cs_lines))
         row = Horizontal(classes="settings-section-actions")
         host.mount(row)
@@ -1942,16 +1934,8 @@ class SettingsScreen(ModalScreen[None]):
         cw_badge = _badge(cw.get("installed", False), cw.get("dismissed", False), cw_block)
         cw_lines = [
             f"🔻 Codex `/slim` 통합   {cw_badge}",
-            "─────────────────────────",
-            "Codex TUI 안의 `/slim` 명령이 codex-slim-now 를 호출하고,",
-            "wrapper/loop 가 slim 후 같은 터미널에서 재시작하도록 연결합니다.",
-            "",
-            "검사 항목:",
+            "Codex 안에서 `/slim` 후 같은 터미널로 재시작하도록 연결합니다.",
         ]
-        for label, target, ok in cw.get("details", []):
-            mark = "✓" if ok else "✗"
-            cw_lines.append(f"  {mark} {label}")
-            cw_lines.append(f"      {target}")
         _mount_card("\n".join(cw_lines))
         row = Horizontal(classes="settings-section-actions")
         host.mount(row)
@@ -1964,23 +1948,13 @@ class SettingsScreen(ModalScreen[None]):
 
         # 5) Claude dingdong
         dd = snap.get("dingdong", {})
-        # deps_reason 은 카드 본문에 details 와 함께 표시 (badge 는 깔끔하게 유지)
         dd_badge = _badge(dd.get("installed", False), dd.get("dismissed", False))
         dd_lines = [
-            f"🔔 Claude 작업 완료 알림음 (Stop hook)   {dd_badge}",
-            "─────────────────────────",
-            "Claude 응답이 끝나면 솔–미–도 (~1.4 초) 알림음이 한 번 울립니다.",
-            "Linux 는 python3 + numpy + aplay, macOS 는 afplay 만 있으면 동작.",
-            "",
-            "검사 항목:",
+            f"🔔 Claude 작업 완료 알림음   {dd_badge}",
+            "Claude 응답 완료 시 알림음을 울립니다.",
         ]
-        for label, target, ok in dd.get("details", []):
-            mark = "✓" if ok else "✗"
-            dd_lines.append(f"  {mark} {label}")
-            dd_lines.append(f"      {target}")
         if not dd.get("deps_ok", False):
-            dd_lines.append("")
-            dd_lines.append(f"  ⚠ 의존성: {dd.get('deps_reason', '')}")
+            dd_lines.append("필요한 오디오 의존성이 아직 준비되지 않았습니다.")
         _mount_card("\n".join(dd_lines))
         row = Horizontal(classes="settings-section-actions")
         host.mount(row)
@@ -1995,20 +1969,11 @@ class SettingsScreen(ModalScreen[None]):
         cdd = snap.get("codex_dingdong", {})
         cdd_badge = _badge(cdd.get("installed", False), cdd.get("dismissed", False))
         cdd_lines = [
-            f"🔔 Codex 작업 완료 알림음 (wrapper 감시)   {cdd_badge}",
-            "─────────────────────────",
-            "Codex 응답 끝에 JSONL task_complete 이벤트가 기록되면 같은 딩동댕을 울립니다.",
-            "Codex wrapper로 시작한 새 세션부터 적용됩니다.",
-            "",
-            "검사 항목:",
+            f"🔔 Codex 작업 완료 알림음   {cdd_badge}",
+            "Codex 응답 완료 시 알림음을 울립니다.",
         ]
-        for label, target, ok in cdd.get("details", []):
-            mark = "✓" if ok else "✗"
-            cdd_lines.append(f"  {mark} {label}")
-            cdd_lines.append(f"      {target}")
         if not cdd.get("deps_ok", False):
-            cdd_lines.append("")
-            cdd_lines.append(f"  ⚠ 의존성: {cdd.get('deps_reason', '')}")
+            cdd_lines.append("필요한 오디오 의존성이 아직 준비되지 않았습니다.")
         _mount_card("\n".join(cdd_lines))
         row = Horizontal(classes="settings-section-actions")
         host.mount(row)

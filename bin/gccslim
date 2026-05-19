@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.19"
+GCCFORK_VERSION = "2026.05.19.1"
 GCCFORK_WORKER = "Claude"
 
 
