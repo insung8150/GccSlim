@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.19.2"
+GCCFORK_VERSION = "2026.05.19.3"
 GCCFORK_WORKER = "Claude"
 
 
@@ -2594,6 +2594,74 @@ class ConfirmScreen(ModalScreen[bool]):
             # propagation 차단 — App 레벨의 escape→quit 바인딩까지 올라가는 거 방지
             event.stop()
             self.dismiss(False)
+
+
+class SummarizeProviderScreen(ModalScreen[Optional[str]]):
+    """Choose which CLI should generate AI summaries."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "취소", show=False),
+        Binding("q", "cancel", "취소", show=False),
+    ]
+
+    def __init__(self, *, has_claude: bool, has_codex: bool) -> None:
+        super().__init__()
+        self.has_claude = has_claude
+        self.has_codex = has_codex
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label("📝 요약 LLM 선택", id="confirm-title")
+            yield SelectableTextArea(
+                "선택한 CLI로 세션 요약을 생성합니다.\n"
+                "Claude는 Haiku 요약을 사용하고, Codex는 비대화형 exec 요약을 사용합니다.",
+                id="confirm-text",
+                read_only=True,
+                show_cursor=False,
+                soft_wrap=True,
+                compact=True,
+                highlight_cursor_line=False,
+            )
+            with RadioSet(id="summarize-provider-radio"):
+                yield RadioButton(
+                    "Claude",
+                    value=self.has_claude,
+                    id="summarize-provider-claude",
+                    disabled=not self.has_claude,
+                )
+                yield RadioButton(
+                    "Codex",
+                    value=(not self.has_claude and self.has_codex),
+                    id="summarize-provider-codex",
+                    disabled=not self.has_codex,
+                )
+            with Horizontal(id="confirm-btn-row"):
+                yield Button("취소", id="btn-cancel")
+                yield Button("요약 시작", id="btn-confirm", variant="primary")
+        yield CopyMenuOverlay(id="copy-menu")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-confirm", Button).focus()
+
+    def _selected_provider(self) -> Optional[str]:
+        try:
+            if self.query_one("#summarize-provider-claude", RadioButton).value:
+                return "claude"
+            if self.query_one("#summarize-provider-codex", RadioButton).value:
+                return "codex"
+        except Exception:
+            pass
+        return None
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "btn-confirm":
+            self.dismiss(self._selected_provider())
+        elif bid == "btn-cancel":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ResumeConflictScreen(ModalScreen[str]):
@@ -8282,38 +8350,53 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
     def action_multi_summarize(self) -> None:
         """다중 선택 → **1번 배치 호출**로 모두 요약. 진행 UI 포함.
 
-        - claude -p --output-format stream-json 로 스트리밍 입력 받아 실시간 표시
+        - Claude 또는 Codex CLI 를 사용자가 선택
         - Knight Rider 스캐너 애니메이션 + 우→좌 스트림 텍스트
         - 응답을 번호 매김으로 파싱 → 각 세션 registry 에 저장
         """
         if not self._multi_selected_ids:
             return
-        if not shutil.which("claude"):
-            self.notify("claude CLI 가 PATH 에 없습니다.", severity="error")
+        has_claude = bool(shutil.which("claude"))
+        has_codex = bool(shutil.which("codex"))
+        if not (has_claude or has_codex):
+            self.notify("요약에 사용할 claude/codex CLI 가 PATH 에 없습니다.", severity="error")
             return
         sel_ids = list(self._multi_selected_ids)
         sessions_to_summarize = [s for s in self.sessions if s.id in sel_ids]
         if not sessions_to_summarize:
             return
+
+        def _start(provider: Optional[str]) -> None:
+            if provider not in {"claude", "codex"}:
+                return
+            self._start_multi_summarize(sessions_to_summarize, provider)
+
+        self.push_screen(
+            SummarizeProviderScreen(has_claude=has_claude, has_codex=has_codex),
+            _start,
+        )
+
+    def _start_multi_summarize(self, sessions_to_summarize: list[Session], provider: str) -> None:
         n = len(sessions_to_summarize)
         self._summarize_in_progress = True
         # 진행 배너 표시 + 스캐너 애니메이션 시작
-        self._show_progress_banner(f"📝 AI요약 배치 호출 — {n}개 세션 1회 처리 중")
+        label = "Claude" if provider == "claude" else "Codex"
+        self._show_progress_banner(f"📝 AI요약 배치 호출 — {label} · {n}개 세션 1회 처리 중")
         self._start_scanner_animation()
 
         import threading
         threading.Thread(
             target=self._summarize_batch_worker,
-            args=(sessions_to_summarize,),
+            args=(sessions_to_summarize, provider),
             daemon=True,
         ).start()
 
-    def _summarize_batch_worker(self, sessions: list[Session]) -> None:
+    def _summarize_batch_worker(self, sessions: list[Session], provider: str = "claude") -> None:
         """배치 요약 워커 (백그라운드 스레드).
 
         1. 각 세션의 발췌를 번호 매겨 합쳐 1개 prompt
-        2. claude --output-format stream-json 으로 스트리밍 호출
-        3. 각 partial chunk → call_from_thread 로 stream UI 갱신
+        2. 선택한 CLI 로 1회 호출
+        3. 응답 수신 상태를 progress UI 에 표시
         4. 최종 응답 파싱 → 번호별 요약 추출 → registry 저장
         """
         n = len(sessions)
@@ -8344,49 +8427,21 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             f"--- 대화 1 부터 시작 ---"
         )
 
-        env = os.environ.copy()
-        env.pop("VIRTUAL_ENV", None)
-        env.pop("UV_PROJECT_ENVIRONMENT", None)
-        env.pop("PYTHONHOME", None)
-        has_api_key = bool(env.get("ANTHROPIC_API_KEY"))
-        if has_api_key:
-            args = [
-                "claude", "--bare", "-p", user_prompt, "--model", "haiku",
-                "--append-system-prompt", system_prompt,
-            ]
-            cwd = None
-        else:
-            args = [
-                "claude", "-p", user_prompt, "--model", "haiku",
-                "--no-session-persistence",
-                "--disable-slash-commands",
-                "--exclude-dynamic-system-prompt-sections",
-                "--append-system-prompt", system_prompt,
-            ]
-            cwd = "/tmp"
-
         # 진행 단계 안내 — 스트림 텍스트 영역에 단계별 메시지 표시
         try:
-            self.call_from_thread(self._update_stream_text, "Haiku 호출 중…")
+            provider_label = "Claude Haiku" if provider == "claude" else "Codex exec"
+            self.call_from_thread(self._update_stream_text, f"{provider_label} 호출 중…")
         except Exception:
             pass
 
-        accumulated = ""
-        try:
-            result = subprocess.run(
-                args, capture_output=True, text=True, timeout=180,
-                env=env, cwd=cwd,
-            )
-            if result.returncode == 0:
-                accumulated = result.stdout
-                try:
-                    # 응답 도착을 시각적으로 — 처음 80자 흐르듯 표시
-                    snippet = accumulated.replace("\n", " │ ")[:200]
-                    self.call_from_thread(self._update_stream_text, f"응답 수신: {snippet}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        accumulated = self._run_summary_llm(provider, system_prompt, user_prompt, timeout=180) or ""
+        if accumulated:
+            try:
+                # 응답 도착을 시각적으로 — 처음 80자 흐르듯 표시
+                snippet = accumulated.replace("\n", " │ ")[:200]
+                self.call_from_thread(self._update_stream_text, f"응답 수신: {snippet}")
+            except Exception:
+                pass
 
         # 응답 파싱 — "1. 요약" / "2. 요약" 형식 추출
         summaries = self._parse_numbered_summaries(accumulated, n)
@@ -8407,6 +8462,93 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             self.call_from_thread(self._summarize_complete, ok, fail)
         except Exception:
             pass
+
+    @staticmethod
+    def _run_summary_llm(provider: str, system_prompt: str, user_prompt: str, *, timeout: int) -> Optional[str]:
+        env = os.environ.copy()
+        env.pop("VIRTUAL_ENV", None)
+        env.pop("UV_PROJECT_ENVIRONMENT", None)
+        env.pop("PYTHONHOME", None)
+        if provider == "claude":
+            has_api_key = bool(env.get("ANTHROPIC_API_KEY"))
+            if has_api_key:
+                args = [
+                    "claude", "--bare", "-p", user_prompt, "--model", "haiku",
+                    "--append-system-prompt", system_prompt,
+                ]
+                cwd = None
+            else:
+                args = [
+                    "claude", "-p", user_prompt, "--model", "haiku",
+                    "--no-session-persistence",
+                    "--disable-slash-commands",
+                    "--exclude-dynamic-system-prompt-sections",
+                    "--append-system-prompt", system_prompt,
+                ]
+                cwd = "/tmp"
+            try:
+                result = subprocess.run(
+                    args, capture_output=True, text=True, timeout=timeout,
+                    env=env, cwd=cwd,
+                )
+                if result.returncode == 0:
+                    return result.stdout
+            except Exception:
+                return None
+            return None
+
+        if provider == "codex":
+            if not shutil.which("codex"):
+                return None
+            prompt = (
+                f"{system_prompt}\n\n"
+                "아래 사용자 요청을 수행하세요. 절대 파일을 읽거나 명령을 실행하지 말고, "
+                "제공된 텍스트만 요약하세요.\n\n"
+                f"{user_prompt}"
+            )
+            env["CODEX_NO_SLIM_LOOP"] = "1"
+            output_path = None
+            try:
+                with NamedTemporaryFile("w+", encoding="utf-8", delete=False) as tmp:
+                    output_path = tmp.name
+                args = [
+                    "codex", "exec",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "--sandbox", "read-only",
+                    "-C", "/tmp",
+                    "-o", output_path,
+                    "-",
+                ]
+                result = subprocess.run(
+                    args,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                    cwd="/tmp",
+                )
+                if output_path:
+                    try:
+                        text = Path(output_path).read_text(encoding="utf-8", errors="ignore")
+                    except OSError:
+                        text = ""
+                    if text.strip():
+                        return text
+                if result.returncode == 0:
+                    return result.stdout
+            except Exception:
+                return None
+            finally:
+                if output_path:
+                    try:
+                        Path(output_path).unlink()
+                    except OSError:
+                        pass
+            return None
+
+        return None
 
     @staticmethod
     def _extract_stream_text_chunk(obj: dict) -> str:
