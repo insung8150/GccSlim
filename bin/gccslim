@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.19.4"
+GCCFORK_VERSION = "2026.05.19.5"
 GCCFORK_WORKER = "Claude"
 
 
@@ -9716,6 +9716,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         exit_label: str,
         success_message: str,
         color_session_id: Optional[str] = None,
+        extra_env: Optional[dict[str, str]] = None,
     ) -> None:
         """Claude/Codex 변환 재개처럼 임의 CLI cmd 를 정확한 대상 터미널에 spawn.
 
@@ -9736,6 +9737,8 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             try:
                 cwd = session_cwd if session_cwd and Path(session_cwd).exists() else os.getcwd()
                 env = _sanitize_env_for_claude()
+                if extra_env:
+                    env.update({k: v for k, v in extra_env.items() if v is not None})
                 color_tag = _vscode_terminal_color_for_session(color_session_id or session.id)
                 ok, used = _spawn_claude_in_new_terminal(
                     terminal_name,
@@ -10072,6 +10075,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             exit_label="codex 세션",
             success_message=f"✓ 새 Codex 세션 시작 ({mode_label})",
             color_session_id=None,
+            extra_env={
+                "GCCFORK_CODEX_TITLE_BASE": name,
+            },
         )
 
     def action_fork(self) -> None:

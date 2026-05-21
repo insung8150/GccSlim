@@ -191,6 +191,32 @@ def _play_dingdong() -> None:
         pass
 
 
+def _codex_sid_label(session_id: str) -> str:
+    sid = str(session_id or "")
+    return f"~{sid[-3:]}" if len(sid) >= 3 else f"~{sid}"
+
+
+def _terminal_title_for_session(session_id: str, cwd: str | None) -> str:
+    base = (os.environ.get("GCCFORK_CODEX_TITLE_BASE") or "").strip()
+    if not base:
+        base = Path(cwd).name if cwd else "Codex"
+    if base.startswith("Codex "):
+        base = base[len("Codex "):].strip()
+    return f"Codex {_codex_sid_label(session_id)} {base}".strip()[:80]
+
+
+def _set_terminal_title(title: str) -> None:
+    if not title:
+        return
+    try:
+        # OSC 0 updates the title in VS Code integrated terminal and common
+        # desktop terminals without printing visible text into the TUI.
+        sys.stdout.write(f"\033]0;{title}\a")
+        sys.stdout.flush()
+    except OSError:
+        pass
+
+
 def _iter_new_jsonl_rows(path: Path, offset: int) -> tuple[int, list[dict[str, Any]]]:
     try:
         size = path.stat().st_size
@@ -425,6 +451,7 @@ def run_loop(
         code: int | None = None
         last_jsonl: Path | None = None
         last_cwd: str | None = None
+        last_titled_session_id: str | None = None
         jsonl_offsets: dict[Path, int] = {}
         while True:
             jsonl_path, _deleted, session_id = _proc_codex_jsonl(proc.pid)
@@ -435,6 +462,9 @@ def run_loop(
                     jsonl_offsets.setdefault(jsonl_path, jsonl_path.stat().st_size)
                 except Exception:
                     last_cwd = None
+            if session_id and session_id != last_titled_session_id:
+                _set_terminal_title(_terminal_title_for_session(session_id, last_cwd))
+                last_titled_session_id = session_id
             if dingdong_enabled and jsonl_path and jsonl_path.exists():
                 offset = jsonl_offsets.get(jsonl_path)
                 if offset is None:
