@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.19.5"
+GCCFORK_VERSION = "2026.05.19.6"
 GCCFORK_WORKER = "Claude"
 
 
@@ -10069,7 +10069,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         self._launch_custom_session_terminal(
             cmd=["codex"],
             session=dummy,
-            tab_title=f"Codex {name}"[:80],
+            tab_title=f"🤖 {name}"[:80],
             spawn_mode=spawn_mode,
             target_terminal=target_terminal,
             exit_label="codex 세션",
@@ -11469,6 +11469,13 @@ def _tab_display_name(session: Session) -> str:
     """
     raw_title = session.custom_name or session.auto_summary or ""
     display_id = _display_session_id(session)
+    if session.source == "codex":
+        codex_prefix = f"🤖[{display_id}]"
+        if raw_title and raw_title.startswith(codex_prefix):
+            return raw_title
+        if raw_title:
+            return f"{codex_prefix} {raw_title}"
+        return f"{codex_prefix} Codex"
     if raw_title and re.match(rf"^{re.escape(display_id)}\b", raw_title):
         return raw_title
     if raw_title:
@@ -11478,6 +11485,9 @@ def _tab_display_name(session: Session) -> str:
 
 def _tab_title_for(session: Session) -> str:
     """최종 탭 제목: `<color_emoji> <tree_prefix><display_name>` 형식 (80자 cap)."""
+    if session.source == "codex":
+        prefix = _compute_tree_prefix(session.id)
+        return f"{prefix}{_tab_display_name(session)}"[:80]
     color = _color_for_session(session.id)
     prefix = _compute_tree_prefix(session.id)
     return f"{color} {prefix}{_tab_display_name(session)}"[:80]

@@ -202,7 +202,7 @@ def _terminal_title_for_session(session_id: str, cwd: str | None) -> str:
         base = Path(cwd).name if cwd else "Codex"
     if base.startswith("Codex "):
         base = base[len("Codex "):].strip()
-    return f"Codex {_codex_sid_label(session_id)} {base}".strip()[:80]
+    return f"🤖[{_codex_sid_label(session_id)}] {base}".strip()[:80]
 
 
 def _set_terminal_title(title: str) -> None:
