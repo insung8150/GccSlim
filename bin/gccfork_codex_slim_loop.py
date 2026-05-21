@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,10 @@ PROJECT_PREFS_FILE = Path(".gccfork") / "ccfork-prefs.json"
 GLOBAL_REGISTRY_PATH = Path.home() / ".claude" / "gccfork-registry.json"
 BRIDGE_ALIVE_DIR = Path.home() / ".claude" / "gccfork-bridge-alive"
 BRIDGE_RENAME_DIR = Path.home() / ".claude" / "gccfork-rename-requests"
+COLOR_EMOJIS = [
+    "🟥", "🟧", "🟨", "🟩", "🟦", "🟪",
+    "🔴", "🟠", "🟢", "🔵", "🟣", "🟤",
+]
 
 
 @dataclass(frozen=True)
@@ -198,13 +203,52 @@ def _codex_sid_label(session_id: str) -> str:
     return f"~{sid[-3:]}" if len(sid) >= 3 else f"~{sid}"
 
 
+def _registry_sessions() -> dict[str, Any]:
+    data = _read_json_dict(GLOBAL_REGISTRY_PATH) or {}
+    sessions = data.get("sessions")
+    if isinstance(sessions, dict):
+        return sessions
+    return data
+
+
+def _registry_entry(session_id: str) -> dict[str, Any]:
+    entry = _registry_sessions().get(session_id, {})
+    return entry if isinstance(entry, dict) else {}
+
+
+def _root_session_id(session_id: str, max_depth: int = 30) -> str:
+    sessions = _registry_sessions()
+    current = str(session_id or "")
+    visited = {current}
+    for _ in range(max_depth):
+        entry = sessions.get(current, {})
+        parent = entry.get("parent_id") if isinstance(entry, dict) else None
+        if not parent or parent in visited:
+            return current
+        current = str(parent)
+        visited.add(current)
+    return current
+
+
+def _color_for_session(session_id: str) -> str:
+    root = _root_session_id(session_id)
+    explicit = _registry_entry(root).get("color")
+    if explicit in COLOR_EMOJIS:
+        return str(explicit)
+    try:
+        digest = hashlib.sha256(root.encode("utf-8")).digest()
+        return COLOR_EMOJIS[digest[0] % len(COLOR_EMOJIS)]
+    except Exception:
+        return COLOR_EMOJIS[0]
+
+
 def _terminal_title_for_session(session_id: str, cwd: str | None) -> str:
     base = (os.environ.get("GCCFORK_CODEX_TITLE_BASE") or "").strip()
     if not base:
         base = Path(cwd).name if cwd else "Codex"
     if base.startswith("Codex "):
         base = base[len("Codex "):].strip()
-    return f"🤖[{_codex_sid_label(session_id)}] {base}".strip()[:80]
+    return f"{_color_for_session(session_id)} 🤖 [{_codex_sid_label(session_id)}] {base}".strip()[:80]
 
 
 def _set_terminal_title(title: str) -> None:
@@ -495,6 +539,7 @@ def run_loop(
         last_jsonl: Path | None = None
         last_cwd: str | None = None
         last_titled_session_id: str | None = None
+        last_terminal_title: str | None = None
         jsonl_offsets: dict[Path, int] = {}
         while True:
             jsonl_path, _deleted, session_id = _proc_codex_jsonl(proc.pid)
@@ -505,11 +550,13 @@ def run_loop(
                     jsonl_offsets.setdefault(jsonl_path, jsonl_path.stat().st_size)
                 except Exception:
                     last_cwd = None
-            if session_id and session_id != last_titled_session_id:
+            if session_id:
                 title = _terminal_title_for_session(session_id, last_cwd)
-                _set_terminal_title(title)
-                _request_vscode_terminal_rename(title, session_id)
-                last_titled_session_id = session_id
+                if session_id != last_titled_session_id or title != last_terminal_title:
+                    _set_terminal_title(title)
+                    _request_vscode_terminal_rename(title, session_id)
+                    last_titled_session_id = session_id
+                    last_terminal_title = title
             if dingdong_enabled and jsonl_path and jsonl_path.exists():
                 offset = jsonl_offsets.get(jsonl_path)
                 if offset is None:

@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.19.7"
+GCCFORK_VERSION = "2026.05.19.8"
 GCCFORK_WORKER = "Claude"
 
 
@@ -9916,6 +9916,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             exit_label="codex 세션",
             success_message=f"✓ Codex로 열기 완료 ({mode_label}, {_codex_sid_label(codex_sid)} <= {session.short_id})",
             color_session_id=session.id,
+            extra_env={
+                "GCCFORK_CODEX_TITLE_BASE": convert_name,
+            },
         )
         self.reload_sessions()
 
@@ -10038,6 +10041,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             exit_label="codex 세션",
             success_message=f"✓ Codex 세션 재개 ({mode_label}, {session.short_id})",
             color_session_id=session.id,
+            extra_env={
+                "GCCFORK_CODEX_TITLE_BASE": title_base,
+            },
         )
         self._spawned_sids.add(session.id)
         self._spawned_at[session.id] = time.time()
@@ -11112,7 +11118,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         if session_id:
             color_tag = _vscode_terminal_color_for_session(session_id)
             color_emoji = _color_for_session(session_id)
-            tab_title = f"{color_emoji} {name}"[:80]
+            tab_title = f"{color_emoji} 💬 {name}"[:80]
         else:
             color_tag = None
             tab_title = name
@@ -11470,24 +11476,28 @@ def _tab_display_name(session: Session) -> str:
     raw_title = session.custom_name or session.auto_summary or ""
     display_id = _display_session_id(session)
     if session.source == "codex":
-        codex_prefix = f"🤖[{display_id}]"
+        codex_prefix = f"🤖 [{display_id}]"
         if raw_title and raw_title.startswith(codex_prefix):
             return raw_title
         if raw_title:
             return f"{codex_prefix} {raw_title}"
         return f"{codex_prefix} Codex"
-    if raw_title and re.match(rf"^{re.escape(display_id)}\b", raw_title):
+    claude_prefix = "💬 "
+    if raw_title and raw_title.startswith(claude_prefix):
         return raw_title
+    if raw_title and re.match(rf"^{re.escape(display_id)}\b", raw_title):
+        return f"{claude_prefix}{raw_title}"
     if raw_title:
-        return f"{display_id} {raw_title}"
-    return f"Session {display_id}"
+        return f"{claude_prefix}{display_id} {raw_title}"
+    return f"{claude_prefix}Session {display_id}"
 
 
 def _tab_title_for(session: Session) -> str:
     """최종 탭 제목: `<color_emoji> <tree_prefix><display_name>` 형식 (80자 cap)."""
     if session.source == "codex":
+        color = _color_for_session(session.id)
         prefix = _compute_tree_prefix(session.id)
-        return f"{prefix}{_tab_display_name(session)}"[:80]
+        return f"{color} {prefix}{_tab_display_name(session)}"[:80]
     color = _color_for_session(session.id)
     prefix = _compute_tree_prefix(session.id)
     return f"{color} {prefix}{_tab_display_name(session)}"[:80]

@@ -1,6 +1,6 @@
 # Publish Checklist
 
-Release version: `v2026.05.19.7`
+Release version: `v2026.05.19.8`
 
 - [x] Choose and add a license.
 - [x] Keep the public command name as `gccslim`.
