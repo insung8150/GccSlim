@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.19.3"
+GCCFORK_VERSION = "2026.05.19.4"
 GCCFORK_WORKER = "Claude"
 
 
@@ -1078,8 +1078,18 @@ def _codex_wrapper_state_for_sid(session_id: str) -> Optional[dict]:
 
 def _display_session_id(session: Session) -> str:
     if session.source == "codex":
-        return f"~{session.id[-3:]}"
+        return _codex_sid_label(session.id)
     return session.id[:4]
+
+
+def _codex_sid_label(session_id: str) -> str:
+    """Human-facing Codex id label.
+
+    Codex ids share time-ordered prefixes, so GccSlim/GccSlim uses the last
+    three hex chars with a tilde everywhere it displays a short Codex id.
+    """
+    sid = str(session_id or "")
+    return f"~{sid[-3:]}" if len(sid) >= 3 else f"~{sid}"
 
 
 def _clean_parent_title(title: str) -> str:
@@ -1088,6 +1098,8 @@ def _clean_parent_title(title: str) -> str:
     title = re.sub(r"^[a-f0-9]{8}(?:\[<= [a-f0-9]{8}\])?\s*", "", title, flags=re.IGNORECASE)
     # 신규 suffix 포맷: "이름 XXXX[<= XXXX]"
     title = re.sub(r"\s*[a-f0-9]{4}\[<=\s*[a-f0-9]{4}\]\s*$", "", title, flags=re.IGNORECASE)
+    # Codex suffix 포맷: "이름 ~xxx[<= ~yyy]" (옛 ~xxxx 도 함께 제거)
+    title = re.sub(r"\s*~[a-f0-9]{3,4}\[<=\s*~[a-f0-9]{3,4}\]\s*$", "", title, flags=re.IGNORECASE)
     return title.strip()
 
 
@@ -1257,7 +1269,9 @@ def hard_fork_codex_session_with(session: Session, new_session_id: str, custom_n
 
     _verify_hard_fork_copy(session.jsonl_path, new_path, src_stat_before)
 
-    clone_name = (custom_name or f"~{new_session_id[-4:]}[<= ~{session.id[-4:]}]").strip()[:120]
+    clone_name = (
+        custom_name or f"{_codex_sid_label(new_session_id)}[<= {_codex_sid_label(session.id)}]"
+    ).strip()[:120]
     registry_set(
         new_session_id,
         parent_id=session.id,
@@ -1360,8 +1374,8 @@ def slim_codex_session_with(
         clone_result = module.apply_slim_plan_to_new_session(plan)
         new_sid = str(clone_result.cloned_session_id)
         clone_name = (
-            custom_name.replace("????", new_sid[-4:]) if custom_name
-            else f"{_clean_parent_title(session.title)} 🔻~{new_sid[-4:]}[<= ~{session.id[-4:]}]"
+            custom_name.replace("????", new_sid[-3:]) if custom_name
+            else f"{_clean_parent_title(session.title)} 🔻{_codex_sid_label(new_sid)}[<= {_codex_sid_label(session.id)}]"
         ).strip()[:120]
         registry_set(
             new_sid,
@@ -2262,6 +2276,19 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
         # 자동으로 "<prefix> " 를 prepend 한다 (사용자는 뒤만 수정).
         self.sid_prefix = sid_prefix
 
+    def _sid_prefix_applies(self) -> bool:
+        """Return whether the readonly sid prefix is truthful for target CLI.
+
+        Claude new-root can be started with a preselected --session-id, so the
+        prefix is exact. Codex new-root cannot currently accept an externally
+        chosen sid; it creates the real sid on first startup. Showing the Claude
+        preallocated prefix for Codex is misleading, so hide and do not prepend
+        it when the selected target is Codex.
+        """
+        if not self.sid_prefix:
+            return False
+        return self._current_open_target() != "codex"
+
     def _effective_target(self) -> Optional[str]:
         """현재 체크박스 상태 기준 최종 대상 터미널."""
         if self.other_env:
@@ -2282,6 +2309,13 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
         newtab.display = show
         if not show:
             newtab.value = False  # 잔여 체크 상태 제거
+
+    def _update_sid_prefix_visibility(self) -> None:
+        try:
+            prefix = self.query_one("#forkname-sid-prefix", Static)
+        except Exception:
+            return
+        prefix.display = self._sid_prefix_applies()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="forkname-box"):
@@ -2362,11 +2396,16 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
         inp.focus()
         inp.cursor_position = len(inp.value)
         self._update_newtab_visibility()
+        self._update_sid_prefix_visibility()
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         # 🔁 다른 환경 토글이 바뀌면 📑 새 탭 체크박스의 표시 여부 재계산
         if event.checkbox.id == "forkname-other-env":
             self._update_newtab_visibility()
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        if event.radio_set.id == "forkname-open-target":
+            self._update_sid_prefix_visibility()
 
     def _current_spawn_mode(self) -> str:
         try:
@@ -2402,7 +2441,7 @@ class ForkNameScreen(ModalScreen[Optional[dict]]):
 
     def _result(self, name: str) -> None:
         final_name = name.strip()
-        if self.sid_prefix:
+        if self._sid_prefix_applies():
             # 관례: [XXXX] 대괄호 + 대문자 형태로 결과 앞에 자동 prepend.
             # 사용자가 실수로 prefix 까지 입력해도 중복 방지.
             bracket_prefix = f"[{self.sid_prefix.upper()}]"
@@ -4575,7 +4614,7 @@ class CodexSlimModeScreen(ModalScreen[Optional[dict]]):
     def _default_clone_name(self) -> str:
         parent_title = _clean_parent_title(self.session.title)
         base = f"{parent_title} " if parent_title else ""
-        return f"{base}🔻~????[<= ~{self.session.id[-4:]}]"[:120]
+        return f"{base}🔻~????[<= {_codex_sid_label(self.session.id)}]"[:120]
 
     def _resume_enabled(self) -> bool:
         try:
@@ -9475,7 +9514,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
     def _default_hard_fork_name(self, parent: Session, new_uuid: str) -> str:
         ptitle = _clean_parent_title(parent.custom_name or parent.auto_summary or "")
         if parent.source == "codex":
-            suffix = f"~{new_uuid[-4:]}[<= ~{parent.id[-4:]}]"
+            suffix = f"{_codex_sid_label(new_uuid)}[<= {_codex_sid_label(parent.id)}]"
         else:
             suffix = f"{new_uuid[:4]}[<= {parent.id[:4]}]"
         return (f"{ptitle} {suffix}" if ptitle else suffix).strip()[:120]
@@ -9843,7 +9882,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             self.notify("Codex 변환 결과에 sid가 없습니다.", severity="error", timeout=10)
             return
         title_base = (tab_name or session.custom_name or session.auto_summary or session.short_id or "Codex").strip()
-        convert_name = f"Codex로 열기 {codex_sid[:4]}[<= {session.id[:4]}] {title_base}"[:160]
+        convert_name = f"Codex로 열기 {_codex_sid_label(codex_sid)}[<= {session.id[:4]}] {title_base}"[:160]
         try:
             registry_set(
                 codex_sid,
@@ -9872,7 +9911,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             spawn_mode=spawn_mode,
             target_terminal=target_terminal,
             exit_label="codex 세션",
-            success_message=f"✓ Codex로 열기 완료 ({mode_label}, {codex_sid[:8]} <= {session.short_id})",
+            success_message=f"✓ Codex로 열기 완료 ({mode_label}, {_codex_sid_label(codex_sid)} <= {session.short_id})",
             color_session_id=session.id,
         )
         self.reload_sessions()
@@ -9924,7 +9963,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             self.notify("Claude 변환 결과에 sid가 없습니다.", severity="error", timeout=10)
             return
         title_base = (tab_name or session.custom_name or session.auto_summary or session.short_id or "Claude").strip()
-        convert_name = f"Claude로 열기 {claude_sid[:4]}[<= {session.id[:4]}] {title_base}"[:160]
+        convert_name = f"Claude로 열기 {claude_sid[:4]}[<= {_codex_sid_label(session.id)}] {title_base}"[:160]
         try:
             registry_set(
                 claude_sid,
@@ -9965,9 +10004,19 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         tab_name: Optional[str],
         spawn_mode: str,
         target_terminal: Optional[str],
+        replay_transcript: bool = False,
     ) -> None:
         """이미 존재하는 Codex JSONL 세션을 `codex resume` 으로 연다."""
         cmd = ["codex", "resume", session.id]
+        if replay_transcript and session.jsonl_path and session.jsonl_path.exists():
+            import shlex
+            helper = Path(__file__).resolve().with_name("gccfork_codex_replay.py")
+            replay_cmd = " ".join(
+                shlex.quote(part)
+                for part in ("GCCFORK_REPLAY_BRAND=GccSlim", "python3", str(helper), str(session.jsonl_path))
+            )
+            resume_cmd = " ".join(shlex.quote(part) for part in cmd)
+            cmd = ["bash", "-lc", f"{replay_cmd}; exec {resume_cmd}"]
         title_base = (tab_name or session.custom_name or session.auto_summary or session.short_id).strip()
         tab_title = _tab_title_for_values(
             session_id=session.id,
@@ -10097,6 +10146,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             if cloned.source == "codex":
                 self._launch_existing_codex_session(
                     cloned, None, spawn_mode=spawn_mode, target_terminal=target_terminal,
+                    replay_transcript=True,
                 )
             else:
                 self._launch_claude_new_terminal(

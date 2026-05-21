@@ -2051,6 +2051,29 @@ class SettingsScreen(ModalScreen[None]):
             btn.disabled = not cdd.get("deps_ok", False)
             row.mount(btn)
 
+        # 7) VS Code terminal scrollback
+        vs = snap.get("vscode_scrollback", {})
+        vs_installed = bool(vs.get("installed", False))
+        vs_value = vs.get("value")
+        vs_recommended = int(vs.get("recommended") or 100000)
+        vs_current = "(미설정)" if vs_value is None else f"{vs_value}줄"
+        vs_badge = "✓ 권고값 적용됨" if vs_installed else "· 권고값 미만"
+        vs_lines = [
+            f"🧾 VS Code 터미널 히스토리   {vs_badge}",
+            f"현재: {vs_current}",
+            f"권고: {vs_recommended}줄",
+            "하드 복제 세션을 열 때 과거 대화 재생이 앞부분까지 남도록 충분한 스크롤백을 확보합니다.",
+        ]
+        _mount_card("\n".join(vs_lines))
+        row = Horizontal(classes="settings-section-actions")
+        host.mount(row)
+        if vs_installed:
+            noop_btn = Button("✓ 이미 권고값")
+            noop_btn.disabled = True
+            row.mount(noop_btn)
+        else:
+            row.mount(Button(f"{vs_recommended}줄로 설정", id="advisor-vscode-scrollback-apply", variant="primary"))
+
     def _handle_advisor_action(self, action: str) -> None:
         """advisor 탭 카드 버튼 클릭 → install_advisor 함수 호출 + 재렌더링."""
         from gccfork_install_advisor import (
@@ -2058,6 +2081,7 @@ class SettingsScreen(ModalScreen[None]):
             apply_codex_wrapper_install, uninstall_codex_wrapper,
             apply_dingdong_install, uninstall_dingdong,
             apply_codex_dingdong_install, uninstall_codex_dingdong,
+            apply_vscode_scrollback_install,
         )
         ok, msg = (False, "")
         if action == "cleanup-apply":
@@ -2083,6 +2107,8 @@ class SettingsScreen(ModalScreen[None]):
             ok, msg = apply_codex_dingdong_install()
         elif action == "codex-dingdong-remove":
             ok, msg = uninstall_codex_dingdong()
+        elif action == "vscode-scrollback-apply":
+            ok, msg = apply_vscode_scrollback_install()
         else:
             return
         try:

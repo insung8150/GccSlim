@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +67,7 @@ DINGDONG_EVENT = "Stop"
 DINGDONG_EVENTS = ("Stop", "Notification")
 PROJECT_PREFS_FILE = Path(".gccfork") / "ccfork-prefs.json"
 GLOBAL_REGISTRY_PATH = Path.home() / ".claude" / "gccfork-registry.json"
+VSCODE_SCROLLBACK_RECOMMENDED = 100000
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +587,125 @@ def codex_dingdong_check_details() -> list[tuple[str, str, bool]]:
     ]
 
 
+# ===========================================================================
+#  4) VS Code terminal scrollback recommendation
+# ===========================================================================
+
+
+def _vscode_settings_candidates() -> list[Path]:
+    home = Path.home()
+    sysname = platform.system()
+    if sysname == "Darwin":
+        base = home / "Library" / "Application Support"
+        return [
+            base / "Code" / "User" / "settings.json",
+            base / "Code - Insiders" / "User" / "settings.json",
+            base / "VSCodium" / "User" / "settings.json",
+        ]
+    if sysname == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            base = Path(appdata)
+            return [
+                base / "Code" / "User" / "settings.json",
+                base / "Code - Insiders" / "User" / "settings.json",
+                base / "VSCodium" / "User" / "settings.json",
+            ]
+    config = home / ".config"
+    return [
+        config / "Code" / "User" / "settings.json",
+        config / "Code - Insiders" / "User" / "settings.json",
+        config / "VSCodium" / "User" / "settings.json",
+    ]
+
+
+def _vscode_settings_path() -> Path:
+    candidates = _vscode_settings_candidates()
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def _strip_json_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"(^|[ \t])//.*?$", r"\1", text, flags=re.M)
+    return text
+
+
+def _read_vscode_settings() -> tuple[dict, Path, str]:
+    path = _vscode_settings_path()
+    if not path.exists():
+        return {}, path, ""
+    raw = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = json.loads(_strip_json_comments(raw))
+    if not isinstance(data, dict):
+        data = {}
+    return data, path, raw
+
+
+def vscode_scrollback_value() -> Optional[int]:
+    try:
+        data, _path, _raw = _read_vscode_settings()
+    except Exception:
+        return None
+    value = data.get("terminal.integrated.scrollback")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def vscode_scrollback_installed() -> bool:
+    value = vscode_scrollback_value()
+    return bool(value is not None and value >= VSCODE_SCROLLBACK_RECOMMENDED)
+
+
+def vscode_scrollback_check_details() -> list[tuple[str, str, bool]]:
+    path = _vscode_settings_path()
+    value = vscode_scrollback_value()
+    current = "(미설정)" if value is None else str(value)
+    return [
+        ("VS Code settings.json", str(path), path.exists()),
+        (
+            "terminal.integrated.scrollback",
+            f"{current} / 권고 {VSCODE_SCROLLBACK_RECOMMENDED}",
+            value is not None and value >= VSCODE_SCROLLBACK_RECOMMENDED,
+        ),
+    ]
+
+
+def apply_vscode_scrollback_install() -> tuple[bool, str]:
+    try:
+        data, path, raw = _read_vscode_settings()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            ts = int(time.time())
+            bak = path.with_suffix(f".json.bak-gccslim-scrollback-{ts}")
+            try:
+                bak.write_text(raw if raw else path.read_text(encoding="utf-8"), encoding="utf-8")
+            except Exception:
+                pass
+        data["terminal.integrated.scrollback"] = VSCODE_SCROLLBACK_RECOMMENDED
+        with NamedTemporaryFile(
+            "w",
+            dir=str(path.parent),
+            prefix=".settings.tmp-",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            tmp_path = Path(f.name)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        return False, f"VS Code scrollback 설정 실패: {exc}"
+    return True, f"VS Code 터미널 히스토리를 {VSCODE_SCROLLBACK_RECOMMENDED}줄로 설정했습니다."
+
+
 def apply_codex_dingdong_install() -> tuple[bool, str]:
     if not codex_wrapper_installed():
         return False, "Codex wrapper 통합이 먼저 설치되어야 합니다."
@@ -923,6 +1045,13 @@ def install_status_summary() -> dict:
             "deps_reason": deps_reason,
             "details": codex_dingdong_check_details(),
         },
+        "vscode_scrollback": {
+            "installed": vscode_scrollback_installed(),
+            "dismissed": False,
+            "value": vscode_scrollback_value(),
+            "recommended": VSCODE_SCROLLBACK_RECOMMENDED,
+            "details": vscode_scrollback_check_details(),
+        },
     }
 
 
@@ -956,6 +1085,10 @@ __all__ = [
     "codex_dingdong_check_details",
     "apply_codex_dingdong_install",
     "uninstall_codex_dingdong",
+    "vscode_scrollback_installed",
+    "vscode_scrollback_check_details",
+    "apply_vscode_scrollback_install",
+    "VSCODE_SCROLLBACK_RECOMMENDED",
     "DingdongInstallScreen",
     "maybe_show_dingdong_modal",
     # Summary
