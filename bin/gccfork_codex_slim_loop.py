@@ -56,6 +56,8 @@ DEFAULT_MARKER = DEFAULT_RUNTIME_DIR / f"gccfork-codex-slim-reload-{os.getuid()}
 DEFAULT_CODEX_BIN = Path.home() / ".local" / "opt" / "codex-patched" / "bin" / "codex"
 PROJECT_PREFS_FILE = Path(".gccfork") / "ccfork-prefs.json"
 GLOBAL_REGISTRY_PATH = Path.home() / ".claude" / "gccfork-registry.json"
+BRIDGE_ALIVE_DIR = Path.home() / ".claude" / "gccfork-bridge-alive"
+BRIDGE_RENAME_DIR = Path.home() / ".claude" / "gccfork-rename-requests"
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,47 @@ def _set_terminal_title(title: str) -> None:
         # desktop terminals without printing visible text into the TUI.
         sys.stdout.write(f"\033]0;{title}\a")
         sys.stdout.flush()
+    except OSError:
+        pass
+
+
+def _vscode_session_id_for_shell_pid(shell_pid: int) -> str | None:
+    try:
+        files = sorted(BRIDGE_ALIVE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for path in files:
+        data = _read_json_dict(path)
+        if not data:
+            continue
+        terminal_pids = data.get("terminalPids") or []
+        try:
+            has_pid = int(shell_pid) in {int(pid) for pid in terminal_pids}
+        except (TypeError, ValueError):
+            has_pid = False
+        if has_pid:
+            session_id = data.get("sessionId")
+            return str(session_id) if session_id else None
+    return None
+
+
+def _request_vscode_terminal_rename(title: str, session_id: str) -> None:
+    if not title:
+        return
+    shell_pid = os.getppid()
+    target_session_id = _vscode_session_id_for_shell_pid(shell_pid)
+    if not target_session_id:
+        return
+    payload = {
+        "targetSessionId": target_session_id,
+        "targetShellPid": shell_pid,
+        "name": title,
+        "requestId": f"codex-title-{session_id}-{shell_pid}-{uuid.uuid4().hex[:8]}",
+    }
+    try:
+        BRIDGE_RENAME_DIR.mkdir(parents=True, exist_ok=True)
+        path = BRIDGE_RENAME_DIR / f"{payload['requestId']}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
 
@@ -463,7 +506,9 @@ def run_loop(
                 except Exception:
                     last_cwd = None
             if session_id and session_id != last_titled_session_id:
-                _set_terminal_title(_terminal_title_for_session(session_id, last_cwd))
+                title = _terminal_title_for_session(session_id, last_cwd)
+                _set_terminal_title(title)
+                _request_vscode_terminal_rename(title, session_id)
                 last_titled_session_id = session_id
             if dingdong_enabled and jsonl_path and jsonl_path.exists():
                 offset = jsonl_offsets.get(jsonl_path)
