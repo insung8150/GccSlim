@@ -10014,7 +10014,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
     ) -> None:
         """이미 존재하는 Codex JSONL 세션을 `codex resume` 으로 연다."""
         cmd = ["codex", "resume", session.id]
-        if replay_transcript and session.jsonl_path and session.jsonl_path.exists():
+        if session.jsonl_path and session.jsonl_path.exists():
             import shlex
             helper = Path(__file__).resolve().with_name("gccfork_codex_replay.py")
             replay_cmd = " ".join(
