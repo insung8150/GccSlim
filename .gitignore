@@ -29,3 +29,4 @@ move_back/
 *.bak
 *.tmp
 *.log
+release-assets/
