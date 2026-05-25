@@ -229,7 +229,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat가 60초 이상 지나면 죽은 것으로 간주
 
-GCCFORK_VERSION = "2026.05.25.1"
+GCCFORK_VERSION = "2026.05.25.2"
 GCCFORK_WORKER = "Claude"
 
 
@@ -9832,7 +9832,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         """Claude JSONL → 새 Codex 검증형 파생 세션 생성."""
         script = Path(__file__).resolve().with_name("gccfork_codex_import.py")
         if script.exists():
-            cmd = [str(script)]
+            cmd = [sys.executable, str(script)]
         else:
             cmd = ["gccfork-codex-import"]
         cmd += ["--claude-jsonl", str(session.jsonl_path), "--json"]
@@ -9926,7 +9926,7 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
         """Codex JSONL → 새 Claude 검증형 파생 세션 생성."""
         script = Path(__file__).resolve().with_name("gccfork_claude_import.py")
         if script.exists():
-            cmd = [str(script)]
+            cmd = [sys.executable, str(script)]
         else:
             cmd = ["gccfork-claude-import"]
         cmd += ["--codex-jsonl", str(session.jsonl_path), "--json"]

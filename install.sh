@@ -41,7 +41,7 @@ if [[ -x "$ROOT/bin/macos-arm64/gccslim-claude-patch" ]]; then
 fi
 
 for f in "$ROOT"/bin/gccfork_*.py; do
-  install -m 0644 "$f" "$BIN_DIR/$(basename "$f")"
+  install -m 0755 "$f" "$BIN_DIR/$(basename "$f")"
 done
 
 if [[ -f "$ROOT/share/gccslim/brain-system-prompt.md" ]]; then

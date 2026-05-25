@@ -1,6 +1,6 @@
 # GccSlim
 
-Current release: `v2026.05.19.8`
+Current release: `v2026.05.25.2`
 
 GccSlim is a local session management and session-slimming distribution for Claude Code and Codex CLI workflows.
 
