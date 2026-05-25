@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Notification chime — solfege "솔 (G5) – 미 (E5) – 도 (C5)" arpeggio (~1.4 s).
+# Notification chime — solfege "sol (G5) – mi (E5) – do (C5)" arpeggio (~1.4 s).
 #
 # Designed for Claude Code's Stop hook:
 #   { "type": "command", "command": "bash ~/.local/share/gccslim/dingdong.sh" }
@@ -53,9 +53,9 @@ def make_note(freq: float, duration: float) -> "np.ndarray":
     tone += np.sin(2 * np.pi * freq * 3 * t) * envelope * 0.1
     return tone * 0.5
 
-ding = make_note(784, 0.4)   # G5  솔
-dong = make_note(659, 0.4)   # E5  미
-deng = make_note(523, 0.6)   # C5  도
+ding = make_note(784, 0.4)   # G5 sol
+dong = make_note(659, 0.4)   # E5 mi
+deng = make_note(523, 0.6)   # C5 do
 gap = np.zeros(int(sr * 0.05))
 
 audio = np.concatenate([ding, gap, dong, gap, deng])

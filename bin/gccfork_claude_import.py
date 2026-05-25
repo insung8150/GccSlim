@@ -281,29 +281,30 @@ def build_claude_session(source: Path, *, max_semantic: int = 2000) -> ImportRes
     out = out_dir / f"{sid}.jsonl"
     git_branch = _git_branch(cwd)
 
-    summary = f"""# Codex 세션 → Claude 파생 세션
+    summary = f"""# Codex Session → Claude Derived Session
 
-이 세션은 Codex 원본 세션을 Claude Code에서 열기 위해 새로 만든 파생 세션이다. 원본 Codex JSONL은 수정하지 않았다.
+This is a derived session created so the original Codex session can be opened
+in Claude Code. The original Codex JSONL was not modified.
 
-원본 Codex SID: {source_sid}
-원본 Codex JSONL: {source}
-원본 originator: {originator}
-작업 cwd: {cwd}
-생성 시각: {now_ts}
+Original Codex SID: {source_sid}
+Original Codex JSONL: {source}
+Original originator: {originator}
+Working cwd: {cwd}
+Created at: {now_ts}
 
-## 직접 파싱 수치
+## Direct Parsing Counts
 row type counts: {counts}
-파싱 실패 라인: {bad}
-semantic message 수(response_item 우선): {len(semantic)}
-event user/assistant message 수: {len(event_messages)}
-function_call 수: {function_calls}
-function_call_output 수: {function_outputs}
+parse-failed lines: {bad}
+semantic message count (response_item preferred): {len(semantic)}
+event user/assistant message count: {len(event_messages)}
+function_call count: {function_calls}
+function_call_output count: {function_outputs}
 
-## 이식 정책
-- Codex response_item user/assistant 본문을 Claude user/assistant row로 재구성했다.
-- response_item이 있으면 event_msg 중복 메시지는 모델 컨텍스트에 넣지 않았다.
-- Codex tool/runtime/apply_patch/exec 내부 상태는 Claude tool_use/tool_result로 억지 변환하지 않았다.
-- 정확한 도구 출력이나 런타임 이벤트가 필요하면 원본 Codex JSONL을 직접 검색해야 한다.
+## Import Policy
+- Codex response_item user/assistant bodies were reconstructed as Claude user/assistant rows.
+- Duplicate event_msg messages were not added to model context when response_item data existed.
+- Codex tool/runtime/apply_patch/exec internals were not forced into Claude tool_use/tool_result rows.
+- Search the original Codex JSONL directly when exact tool output or runtime events are needed.
 """
 
     prev: str | None = None
@@ -315,7 +316,7 @@ function_call_output 수: {function_outputs}
         cwd,
         now_ts,
         prev,
-        "Codex 세션을 Claude 파생 세션으로 이식했습니다. 원본 Codex JSONL은 보존되어 있으며, 도구 런타임 세부사항은 원본에서 확인해야 합니다.",
+        "Imported the Codex session as a Claude derived session. The original Codex JSONL is preserved; inspect it for tool/runtime details.",
         git_branch,
     )
     rows.append(ack)
@@ -332,7 +333,7 @@ function_call_output 수: {function_outputs}
     title = f"Codex import <= {source_sid[:8] or source.stem[:8]}"
     rows.extend(
         [
-            {"type": "last-prompt", "lastPrompt": "Codex 세션을 Claude로 이식", "leafUuid": prev, "sessionId": sid},
+            {"type": "last-prompt", "lastPrompt": "Import Codex session into Claude", "leafUuid": prev, "sessionId": sid},
             {"type": "custom-title", "customTitle": title, "sessionId": sid},
             {"type": "agent-name", "agentName": title, "sessionId": sid},
             {"type": "permission-mode", "permissionMode": "bypassPermissions", "sessionId": sid},

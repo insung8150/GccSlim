@@ -11,6 +11,7 @@ INTEGRATION_DIR="$SHARE_DIR/integration"
 
 mkdir -p "$BIN_DIR" "$SHARE_DIR" "$INTEGRATION_DIR"
 mkdir -p "$BIN_DIR/linux-x86_64" "$BIN_DIR/macos-arm64"
+mkdir -p "$SHARE_DIR/i18n"
 
 install -m 0755 "$ROOT/bin/gccslim" "$BIN_DIR/gccslim"
 install -m 0755 "$ROOT/bin/gccslim-now" "$BIN_DIR/gccslim-now"
@@ -41,11 +42,20 @@ if [[ -x "$ROOT/bin/macos-arm64/gccslim-claude-patch" ]]; then
 fi
 
 for f in "$ROOT"/bin/gccfork_*.py; do
-  install -m 0644 "$f" "$BIN_DIR/$(basename "$f")"
+  install -m 0755 "$f" "$BIN_DIR/$(basename "$f")"
 done
 
 if [[ -f "$ROOT/share/gccslim/brain-system-prompt.md" ]]; then
   install -m 0644 "$ROOT/share/gccslim/brain-system-prompt.md" "$SHARE_DIR/brain-system-prompt.md"
+fi
+if [[ -f "$ROOT/share/gccslim/default-language" ]]; then
+  install -m 0644 "$ROOT/share/gccslim/default-language" "$SHARE_DIR/default-language"
+fi
+if [[ -d "$ROOT/share/i18n" ]]; then
+  for f in "$ROOT"/share/i18n/*.json; do
+    [[ -f "$f" ]] || continue
+    install -m 0644 "$f" "$SHARE_DIR/i18n/$(basename "$f")"
+  done
 fi
 
 # Integration assets — Claude /slim hook + slash commands + optional dingdong.

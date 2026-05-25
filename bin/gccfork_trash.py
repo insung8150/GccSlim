@@ -1,7 +1,8 @@
-"""gccfork 휴지통 — jsonl 영구 삭제 회피.
+"""gccfork trash — avoid permanent JSONL deletion.
 
-삭제 시 즉시 unlink 하지 않고 `~/.claude/gccfork-trash/<sid>/` 로 이동.
-복원 가능. registry 백업도 meta.json 에 함께 저장.
+Deleting a session moves it to `~/.claude/gccfork-trash/<sid>/` instead of
+unlinking it immediately. The session can be restored, and a registry backup is
+stored in meta.json.
 """
 from __future__ import annotations
 
@@ -19,17 +20,17 @@ from gccfork_sessions import (
 )
 
 
-# 삭제 시 jsonl 을 즉시 unlink 하지 않고 이 디렉터리로 이동.
+# Move JSONL files here instead of unlinking them immediately.
 #   <session_id>/
-#     ├─ <basename>.jsonl   ← 원본 jsonl
-#     └─ meta.json          ← original_path / deleted_at / registry 백업
+#     ├─ <basename>.jsonl   ← original JSONL
+#     └─ meta.json          ← original_path / deleted_at / registry backup
 TRASH_DIR = CLAUDE_ROOT / "gccfork-trash"
 
 
 def move_session_to_trash(session_id: str, jsonl_path: Path) -> bool:
-    """jsonl 을 휴지통으로 이동 + meta.json 기록 + registry 제거."""
+    """Move a JSONL to trash, write meta.json, and remove the registry entry."""
     if not jsonl_path.exists():
-        # 이미 사라진 파일 — registry만 정리하고 성공 처리
+        # File already gone; clean only the registry and treat it as success.
         registry_remove(session_id)
         invalidate_parse_cache(jsonl_path)
         return True
@@ -60,9 +61,10 @@ def move_session_to_trash(session_id: str, jsonl_path: Path) -> bool:
     except OSError:
         return False
 
-    # slim_fork_session_with(in_place=True) 가 만든 자동 백업 .bak.<ts>.jsonl
-    # 들도 같이 정리 — 본 폴더에 남으면 scan_sessions 가 잡아서 sid 부활 버그
-    # 의 원인. B안 — 백업의 백업이라 의미 없으므로 그냥 삭제.
+    # Also remove automatic .bak.<ts>.jsonl backups created by
+    # slim_fork_session_with(in_place=True). If they remain in the source
+    # folder, scan_sessions may rediscover the sid. These are backup backups, so
+    # simple deletion is acceptable.
     parent_dir = jsonl_path.parent
     if parent_dir.exists():
         for bak in parent_dir.glob(f"{session_id}.bak.*.jsonl"):
@@ -72,13 +74,13 @@ def move_session_to_trash(session_id: str, jsonl_path: Path) -> bool:
                 pass
 
     registry_remove(session_id)
-    # 캐시에 남아있던 stale 항목 정리 (없으면 no-op)
+    # Clear any stale parse-cache entry; no-op when absent.
     invalidate_parse_cache(jsonl_path)
     return True
 
 
 def list_trash_entries() -> list[dict]:
-    """휴지통의 모든 엔트리 목록 (최근 삭제순)."""
+    """List all trash entries, newest first."""
     if not TRASH_DIR.exists():
         return []
     entries: list[dict] = []
@@ -119,7 +121,7 @@ def list_trash_entries() -> list[dict]:
 
 
 def restore_trash_entry(entry: dict) -> bool:
-    """휴지통 엔트리를 원래 위치로 복원 + registry 재기록."""
+    """Restore a trash entry to its original path and rewrite the registry."""
     src = entry.get("jsonl_path")
     original = entry.get("original_path")
     if not src or not original:
@@ -135,7 +137,7 @@ def restore_trash_entry(entry: dict) -> bool:
     except OSError:
         return False
 
-    # registry 복원
+    # Restore registry.
     reg = entry.get("registry") or {}
     if isinstance(reg, dict):
         clean = {k: v for k, v in reg.items() if v is not None}
@@ -148,13 +150,13 @@ def restore_trash_entry(entry: dict) -> bool:
             shutil.rmtree(str(entry_dir))
         except OSError:
             pass
-    # 복원된 jsonl 캐시 무효화 (혹시 옛 항목 남아있었으면)
+    # Invalidate the restored JSONL cache in case an old entry remains.
     invalidate_parse_cache(dst)
     return True
 
 
 def purge_trash_entry(entry: dict) -> bool:
-    """휴지통 엔트리를 영구 삭제."""
+    """Permanently delete one trash entry."""
     entry_dir = entry.get("entry_dir")
     if not entry_dir:
         return False
@@ -166,7 +168,7 @@ def purge_trash_entry(entry: dict) -> bool:
 
 
 def purge_all_trash() -> int:
-    """휴지통의 모든 엔트리 영구 삭제. 삭제된 개수 반환."""
+    """Permanently delete every trash entry and return the count."""
     if not TRASH_DIR.exists():
         return 0
     count = 0

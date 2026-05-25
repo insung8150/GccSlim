@@ -63,7 +63,7 @@ if [ -z "$sid" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
 fi
 
 if [ -z "$sid" ]; then
-  emit_block "❌ sid 추출 실패. hook 내부 오류."
+  emit_block "❌ Failed to detect the session id. Internal hook error."
   exit 0
 fi
 sid_short="${sid:0:8}"
@@ -85,13 +85,13 @@ for pid in $(pgrep -f "$GCCSLIM_BIN" 2>/dev/null); do
 done
 
 if [ -z "$TUI_PID" ]; then
-    emit_block "❌ GccSlim TUI 가 떠 있지 않습니다.
+    emit_block "❌ The GccSlim TUI is not running.
 
-먼저 외부 터미널에서 실행:
+Run this first in an external terminal:
 
   \$ gccslim
 
-이 도구는 TUI 가 떠 있는 상태에서만 작동합니다."
+This tool only works while the TUI is running."
     exit 0
 fi
 
@@ -121,7 +121,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 if [ ! -s "$TMP_FILE" ]; then
     rm -f "$TMP_FILE"
-    emit_block "❌ TUI request publish 실패."
+    emit_block "❌ Failed to publish the TUI request."
     exit 0
 fi
 mv "$TMP_FILE" "$REQ_FILE"

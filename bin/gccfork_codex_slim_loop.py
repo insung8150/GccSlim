@@ -165,6 +165,14 @@ def _default_include_compact_summaries(*, prefer_prefs: bool = False) -> bool:
     return _bool_pref(env_value, _bool_pref(pref_value, True))
 
 
+def _default_trim_recent_tools(*, prefer_prefs: bool = False) -> bool:
+    pref_value = _pref_get("codex_slim_trim_recent_tools", None)
+    env_value = os.environ.get("CODEX_SLIM_TRIM_RECENT_TOOLS")
+    if prefer_prefs:
+        return _bool_pref(pref_value, _bool_pref(env_value, True))
+    return _bool_pref(env_value, _bool_pref(pref_value, True))
+
+
 def _default_codex_dingdong_enabled() -> bool:
     return _bool_pref(
         os.environ.get("CODEX_DINGDONG_ENABLED"),
@@ -196,6 +204,32 @@ def _play_dingdong() -> None:
         )
     except OSError:
         pass
+
+
+def _candidate_replay_helpers() -> list[Path]:
+    here = Path(__file__).resolve()
+    candidates = [here.with_name("gccfork_codex_replay.py")]
+    for parent in here.parents:
+        candidates.append(parent / "bin" / "gccfork_codex_replay.py")
+        candidates.append(parent / "gccfork_codex_replay.py")
+    return candidates
+
+
+def _replay_transcript_for_terminal(session_file: Path) -> None:
+    if not session_file.exists():
+        return
+    helper = next((path for path in _candidate_replay_helpers() if path.exists()), None)
+    if not helper:
+        print(
+            f"[gccfork-codex-slim] replay helper not found; resume only: {session_file}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    env = _sanitize_env_for_codex(
+        {"GCCFORK_REPLAY_BRAND": os.environ.get("GCCFORK_REPLAY_BRAND", "GccSlim")}
+    )
+    subprocess.run(["python3", str(helper), str(session_file)], env=env, check=False)
 
 
 def _codex_sid_label(session_id: str) -> str:
@@ -439,6 +473,7 @@ def request_slim_reload(
     mode: str,
     keep_recent: int | None,
     include_compact_summaries: bool,
+    trim_recent_tools: bool,
     marker_path: Path,
     exit_codex: bool,
     signal_name: str,
@@ -447,10 +482,10 @@ def request_slim_reload(
 ) -> int:
     if require_wrapper and not os.environ.get("CODEX_SLIM_WRAPPER_ID"):
         print(
-            "오류: /slim은 codex-slim-loop로 시작한 Codex 안에서만 동작합니다.",
+            "Error: /slim only works inside Codex sessions started by codex-slim-loop.",
             file=sys.stderr,
         )
-        print("먼저 실행: codex-slim-loop --", file=sys.stderr)
+        print("Start with: codex-slim-loop --", file=sys.stderr)
         return 2
 
     resolved = find_current_codex_session_from_state()
@@ -463,6 +498,7 @@ def request_slim_reload(
         keep_recent=keep_recent,
         codex_root=CODEX_ROOT,
         include_compact_summaries=include_compact_summaries,
+        trim_recent_tools=trim_recent_tools,
     )
     print(f"codex_pid: {codex_pid}", file=sys.stderr)
     print(f"source_session_id: {plan.session_id}", file=sys.stderr)
@@ -470,11 +506,29 @@ def request_slim_reload(
     print(f"mode: {plan.mode}  keep_recent: {plan.keep_recent}", file=sys.stderr)
     print(f"compact_summaries: {plan.compact_summary_count}", file=sys.stderr)
     print(
+        "compact_detected_types: "
+        + (", ".join(plan.compact_detected_types) if plan.compact_detected_types else "(none)"),
+        file=sys.stderr,
+    )
+    if plan.compact_unknown_types:
+        print("compact_unknown_types: " + ", ".join(plan.compact_unknown_types), file=sys.stderr)
+    print(f"trim_recent_tools: {plan.trim_recent_tools}", file=sys.stderr)
+    print(
         f"size: {fmt_size(plan.original_bytes)} -> {fmt_size(plan.slim_bytes)} "
         f"(save {fmt_size(plan.saved_bytes)}, {plan.saved_percent:.1f}%)",
         file=sys.stderr,
     )
     if dry_run:
+        if plan.recent_turn_reports:
+            print("recent_raw_turns:", file=sys.stderr)
+            for report in plan.recent_turn_reports:
+                saved = report.original_bytes - report.slim_bytes
+                print(
+                    f"  turn {report.turn_no}: "
+                    f"{fmt_size(report.original_bytes)} -> {fmt_size(report.slim_bytes)} "
+                    f"(save {fmt_size(saved)})",
+                    file=sys.stderr,
+                )
         print("--dry-run: no file changes, no restart marker", file=sys.stderr)
         return 0
 
@@ -511,12 +565,13 @@ def run_loop(
     mode: str,
     keep_recent: int | None,
     include_compact_summaries: bool,
+    trim_recent_tools: bool,
 ) -> int:
     wrapper_id = uuid.uuid4().hex
     state_path = marker_path.with_name(marker_path.name + f".state-{wrapper_id}")
     _clear_marker(marker_path)
     codex_bin = os.environ.get("CODEX_REAL_BIN") or str(DEFAULT_CODEX_BIN)
-    args = [codex_bin, *codex_args]
+    args = [codex_bin, "-c", "features.tool_suggest=false", *codex_args]
     dingdong_enabled = _default_codex_dingdong_enabled()
     while True:
         env = _sanitize_env_for_codex(
@@ -527,6 +582,7 @@ def run_loop(
                 "CODEX_SLIM_MODE": mode,
                 "CODEX_SLIM_KEEP_RECENT": "" if keep_recent is None else str(keep_recent),
                 "CODEX_SLIM_INCLUDE_COMPACT_SUMMARIES": "1" if include_compact_summaries else "0",
+                "CODEX_SLIM_TRIM_RECENT_TOOLS": "1" if trim_recent_tools else "0",
                 "CODEX_GCCSLIM_PLAINTEXT_COMPACT": os.environ.get(
                     "CODEX_GCCSLIM_PLAINTEXT_COMPACT",
                     "1",
@@ -609,6 +665,7 @@ def run_loop(
             file=sys.stderr,
             flush=True,
         )
+        _replay_transcript_for_terminal(Path(marker.session_file))
         args = [codex_bin, "resume", marker.session_id]
         if cwd:
             try:
@@ -627,6 +684,11 @@ def parse_loop_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=_default_include_compact_summaries(),
     )
+    parser.add_argument(
+        "--trim-recent-tools",
+        action=argparse.BooleanOptionalAction,
+        default=_default_trim_recent_tools(),
+    )
     parser.add_argument("codex_args", nargs=argparse.REMAINDER, help="Arguments passed to codex after --")
     args = parser.parse_args(argv)
     if args.codex_args and args.codex_args[0] == "--":
@@ -642,6 +704,11 @@ def parse_now_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--include-compact-summaries",
         action=argparse.BooleanOptionalAction,
         default=_default_include_compact_summaries(prefer_prefs=True),
+    )
+    parser.add_argument(
+        "--trim-recent-tools",
+        action=argparse.BooleanOptionalAction,
+        default=_default_trim_recent_tools(prefer_prefs=True),
     )
     parser.add_argument("--marker", type=Path, default=Path(os.environ.get("CODEX_SLIM_MARKER", DEFAULT_MARKER)))
     parser.add_argument("--no-exit", action="store_true", help="Do not terminate the current Codex process")
@@ -663,6 +730,7 @@ def main_loop(argv: list[str] | None = None) -> int:
         mode=args.mode,
         keep_recent=args.keep_recent,
         include_compact_summaries=args.include_compact_summaries,
+        trim_recent_tools=args.trim_recent_tools,
     )
 
 
@@ -672,6 +740,7 @@ def main_now(argv: list[str] | None = None) -> int:
         mode=args.mode,
         keep_recent=args.keep_recent,
         include_compact_summaries=args.include_compact_summaries,
+        trim_recent_tools=args.trim_recent_tools,
         marker_path=args.marker,
         exit_codex=not args.no_exit,
         signal_name=args.signal,

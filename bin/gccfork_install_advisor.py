@@ -4,7 +4,7 @@ Sidecar pattern (per project policy: feature-per-module separation).
 
 Covers 3 optional integrations that the user can install either
 automatically (TUI first-run modal) or manually (Settings modal's
-"권고 설치" tab):
+"Recommended Setup" tab):
 
   1. Claude /slim slash-command integration
        - ~/.claude/commands/slim.md
@@ -249,13 +249,13 @@ def apply_claude_slash_install() -> tuple[bool, str]:
     rel = _release_dir()
     if rel is None:
         return False, (
-            "release/ 디렉터리를 찾을 수 없습니다. "
-            "$GCCSLIM_RELEASE_DIR 환경변수를 설정하거나 "
-            "~/.local/share/gccslim/integration/ 에 자산을 두세요."
+            "Could not find the release/ directory. "
+            "Set $GCCSLIM_RELEASE_DIR or place assets under "
+            "~/.local/share/gccslim/integration/."
         )
     src = rel / "claude-integration"
     if not src.is_dir():
-        return False, f"claude-integration 자산 부재: {src}"
+        return False, f"claude-integration assets missing: {src}"
 
     try:
         CLAUDE_COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
@@ -267,12 +267,12 @@ def apply_claude_slash_install() -> tuple[bool, str]:
         shutil.copy2(src / "slim-reload-intercept.sh", CLAUDE_SLASH_HOOK_DST)
         os.chmod(CLAUDE_SLASH_HOOK_DST, 0o755)
     except Exception as exc:
-        return False, f"파일 복사 실패: {exc}"
+        return False, f"failed to copy files: {exc}"
 
     if not patch_settings_hook(CLAUDE_SLASH_EVENT, CLAUDE_SLASH_HOOK_CMD):
-        return False, "settings.json 패치 실패."
+        return False, "failed to patch settings.json."
 
-    return True, "/slim 통합 설치 완료. 새 터미널에서 claude 띄우면 작동합니다."
+    return True, "/slim integration installed. It works after starting claude in a new terminal."
 
 
 def uninstall_claude_slash() -> tuple[bool, str]:
@@ -290,10 +290,10 @@ def uninstall_claude_slash() -> tuple[bool, str]:
         if slim_dir.exists() and not any(slim_dir.iterdir()):
             slim_dir.rmdir()
     except Exception as exc:
-        return False, f"파일 제거 실패: {exc}"
+        return False, f"failed to remove files: {exc}"
     if not remove_settings_hook(CLAUDE_SLASH_EVENT, "slim-reload-intercept.sh"):
-        return False, "settings.json 정리 실패."
-    return True, f"제거 완료 ({len(removed)} 파일)."
+        return False, "failed to clean settings.json."
+    return True, f"removed {len(removed)} files."
 
 
 # ===========================================================================
@@ -340,11 +340,11 @@ def _binary_contains(path: Path, needle: str) -> bool:
 
 def codex_wrapper_check_details() -> list[tuple[str, str, bool]]:
     """Per-anchor status for the Codex /slim runtime integration."""
-    codex_on_path = shutil.which("codex") or "(PATH 에 codex 없음)"
-    slim_now_on_path = shutil.which("codex-slim-now") or "(PATH 에 codex-slim-now 없음)"
-    slim_loop_on_path = shutil.which("codex-slim-loop") or "(PATH 에 codex-slim-loop 없음)"
+    codex_on_path = shutil.which("codex") or "(codex not found on PATH)"
+    slim_now_on_path = shutil.which("codex-slim-now") or "(codex-slim-now not found on PATH)"
+    slim_loop_on_path = shutil.which("codex-slim-loop") or "(codex-slim-loop not found on PATH)"
     return [
-        ("codex 명령", codex_on_path, bool(shutil.which("codex"))),
+        ("codex command", codex_on_path, bool(shutil.which("codex"))),
         ("codex wrapper", str(CODEX_WRAPPER_BIN), CODEX_WRAPPER_BIN.exists()),
         (
             "wrapper plaintext compact env",
@@ -385,7 +385,7 @@ def codex_wrapper_check_details() -> list[tuple[str, str, bool]]:
 def codex_wrapper_installed() -> bool:
     details = dict((label, ok) for label, _target, ok in codex_wrapper_check_details())
     required = (
-        "codex 명령",
+        "codex command",
         "codex wrapper",
         "wrapper plaintext compact env",
         "wrapper slim loop",
@@ -413,18 +413,18 @@ def codex_wrapper_needs_install() -> bool:
 
 def apply_codex_wrapper_install() -> tuple[bool, str]:
     if codex_wrapper_installed():
-        return True, "Codex /slim 통합은 이미 설치되어 있습니다."
+        return True, "Codex /slim integration is already installed."
     return False, (
-        "Codex /slim 자동 설치 자산은 이 배포본에 없습니다. "
-        "개발본에서는 scripts/patch_codex_for_gccslim.sh 로 설치/패치합니다."
+        "Codex /slim auto-install assets are not included in this build. "
+        "In the development tree, install/patch with scripts/patch_codex_for_gccslim.sh."
     )
 
 
 def uninstall_codex_wrapper() -> tuple[bool, str]:
     return False, (
-        "Codex /slim 통합은 codex wrapper와 patched binary를 포함하므로 "
-        "설정 탭에서 자동 제거하지 않습니다. 필요하면 ~/.local/bin/codex 를 "
-        "원래 codex 실행 파일로 되돌려야 합니다."
+        "Codex /slim integration includes the codex wrapper and patched binary, "
+        "so the Settings tab does not remove it automatically. Restore "
+        "~/.local/bin/codex to the original codex executable if needed."
     )
 
 
@@ -476,11 +476,11 @@ def dingdong_dependencies_ok() -> tuple[bool, str]:
         return _DEPS_CACHE
     # Linux — need aplay + system python3 + numpy.
     if not shutil.which("aplay"):
-        _DEPS_CACHE = (False, "aplay (ALSA) 미설치 — 패키지 매니저로 alsa-utils 설치 필요.")
+        _DEPS_CACHE = (False, "aplay (ALSA) is missing; install alsa-utils with your package manager.")
         return _DEPS_CACHE
     py = _host_python()
     if not py:
-        _DEPS_CACHE = (False, "python3 미설치.")
+        _DEPS_CACHE = (False, "python3 is missing.")
         return _DEPS_CACHE
     # Sanitize env — strip VIRTUAL_ENV so /usr/bin/python3 doesn't see the
     # uv venv's site-packages.
@@ -494,7 +494,7 @@ def dingdong_dependencies_ok() -> tuple[bool, str]:
             env=env,
         )
     except Exception:
-        _DEPS_CACHE = (False, f"{py} 의 numpy 패키지 미설치 (pip install numpy).")
+        _DEPS_CACHE = (False, f"numpy is missing for {py} (pip install numpy).")
         return _DEPS_CACHE
     _DEPS_CACHE = (True, "")
     return _DEPS_CACHE
@@ -505,16 +505,16 @@ def _ensure_dingdong_script_installed() -> tuple[bool, str]:
         return True, ""
     rel = _release_dir()
     if rel is None:
-        return False, "release/ 디렉터리를 찾을 수 없습니다."
+        return False, "Could not find the release/ directory."
     src = rel / "optional" / "dingdong.sh"
     if not src.exists():
-        return False, f"sample 부재: {src}"
+        return False, f"sample missing: {src}"
     try:
         GCCSLIM_SHARE.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, DINGDONG_DST)
         os.chmod(DINGDONG_DST, 0o755)
     except Exception as exc:
-        return False, f"sample 복사 실패: {exc}"
+        return False, f"failed to copy sample: {exc}"
     return True, ""
 
 
@@ -578,12 +578,12 @@ def codex_dingdong_installed() -> bool:
 def codex_dingdong_check_details() -> list[tuple[str, str, bool]]:
     return [
         (
-            "프로젝트 설정",
+            "Project settings",
             ".gccfork/ccfork-prefs.json: codex_dingdong_enabled",
             _pref_bool("codex_dingdong_enabled", False),
         ),
         ("Codex wrapper", "~/.local/bin/codex", codex_wrapper_installed()),
-        ("표준 딩동댕 스크립트", "~/.local/share/gccslim/dingdong.sh", DINGDONG_DST.exists()),
+        ("Standard dingdong script", "~/.local/share/gccslim/dingdong.sh", DINGDONG_DST.exists()),
     ]
 
 
@@ -667,12 +667,12 @@ def vscode_scrollback_installed() -> bool:
 def vscode_scrollback_check_details() -> list[tuple[str, str, bool]]:
     path = _vscode_settings_path()
     value = vscode_scrollback_value()
-    current = "(미설정)" if value is None else str(value)
+    current = "(unset)" if value is None else str(value)
     return [
         ("VS Code settings.json", str(path), path.exists()),
         (
             "terminal.integrated.scrollback",
-            f"{current} / 권고 {VSCODE_SCROLLBACK_RECOMMENDED}",
+            f"{current} / recommended {VSCODE_SCROLLBACK_RECOMMENDED}",
             value is not None and value >= VSCODE_SCROLLBACK_RECOMMENDED,
         ),
     ]
@@ -702,25 +702,25 @@ def apply_vscode_scrollback_install() -> tuple[bool, str]:
             tmp_path = Path(f.name)
         os.replace(tmp_path, path)
     except Exception as exc:
-        return False, f"VS Code scrollback 설정 실패: {exc}"
-    return True, f"VS Code 터미널 히스토리를 {VSCODE_SCROLLBACK_RECOMMENDED}줄로 설정했습니다."
+        return False, f"failed to set VS Code scrollback: {exc}"
+    return True, f"VS Code terminal history set to {VSCODE_SCROLLBACK_RECOMMENDED} lines."
 
 
 def apply_codex_dingdong_install() -> tuple[bool, str]:
     if not codex_wrapper_installed():
-        return False, "Codex wrapper 통합이 먼저 설치되어야 합니다."
+        return False, "Codex wrapper integration must be installed first."
     ok, msg = _ensure_dingdong_script_installed()
     if not ok:
         return False, msg
     if not _write_project_pref("codex_dingdong_enabled", True):
-        return False, "프로젝트 prefs 저장 실패."
-    return True, "Codex 작업 완료 알림을 켰습니다. 새 Codex 세션부터 적용됩니다."
+        return False, "failed to save project prefs."
+    return True, "Codex task-complete notification enabled. Applies to new Codex sessions."
 
 
 def uninstall_codex_dingdong() -> tuple[bool, str]:
     if not _write_project_pref("codex_dingdong_enabled", False):
-        return False, "프로젝트 prefs 저장 실패."
-    return True, "Codex 작업 완료 알림을 껐습니다. 새 Codex 세션부터 적용됩니다."
+        return False, "failed to save project prefs."
+    return True, "Codex task-complete notification disabled. Applies to new Codex sessions."
 
 
 def claude_slash_check_details() -> list[tuple[str, str, bool]]:
@@ -743,15 +743,15 @@ def claude_slash_check_details() -> list[tuple[str, str, bool]]:
          (CLAUDE_COMMANDS_DIR / "slim.md").exists()),
         ("commands/slim/dry.md", str(CLAUDE_COMMANDS_DIR / "slim" / "dry.md"),
          (CLAUDE_COMMANDS_DIR / "slim" / "dry.md").exists()),
-        ("hooks 스크립트", str(CLAUDE_SLASH_HOOK_DST), CLAUDE_SLASH_HOOK_DST.exists()),
-        ("settings.json UserPromptSubmit", hook_match or "(미등록)", bool(hook_match)),
+        ("hooks script", str(CLAUDE_SLASH_HOOK_DST), CLAUDE_SLASH_HOOK_DST.exists()),
+        ("settings.json UserPromptSubmit", hook_match or "(not registered)", bool(hook_match)),
     ]
 
 
 def dingdong_check_details() -> list[tuple[str, str, bool]]:
     """Per-anchor install status for the standard GccSlim dingdong hooks."""
     settings = _load_settings()
-    out = [("표준 경로 스크립트", "~/.local/share/gccslim/dingdong.sh", DINGDONG_DST.exists())]
+    out = [("standard-path script", "~/.local/share/gccslim/dingdong.sh", DINGDONG_DST.exists())]
     for event in DINGDONG_EVENTS:
         hook_match = ""
         for blk in settings.get("hooks", {}).get(event, []):
@@ -762,7 +762,7 @@ def dingdong_check_details() -> list[tuple[str, str, bool]]:
                     break
             if hook_match:
                 break
-        out.append((f"settings.json {event} hook", hook_match or "(미등록)", bool(hook_match)))
+        out.append((f"settings.json {event} hook", hook_match or "(not registered)", bool(hook_match)))
         if hook_match:
             out[-1] = (f"settings.json {event} hook", "bash ~/.local/share/gccslim/dingdong.sh", True)
     return out
@@ -775,8 +775,8 @@ def apply_dingdong_install() -> tuple[bool, str]:
 
     for event in DINGDONG_EVENTS:
         if not patch_settings_hook(event, DINGDONG_HOOK_CMD):
-            return False, f"settings.json {event} hook 등록 실패."
-    return True, "딩동댕 알림 설치 완료. 다음 답변 끝나면 차임벨 재생."
+            return False, f"failed to register settings.json {event} hook."
+    return True, "Dingdong notification installed. A chime plays after the next answer finishes."
 
 
 def uninstall_dingdong() -> tuple[bool, str]:
@@ -785,11 +785,11 @@ def uninstall_dingdong() -> tuple[bool, str]:
         if DINGDONG_DST.exists():
             DINGDONG_DST.unlink()
     except Exception as exc:
-        return False, f"파일 제거 실패: {exc}"
+        return False, f"failed to remove file: {exc}"
     for event in DINGDONG_EVENTS:
         if not remove_settings_hook(event, str(DINGDONG_DST)):
-            return False, f"settings.json {event} 정리 실패 (표준 경로 entry 만 제거됨)."
-    return True, "표준 경로의 딩동댕 알림 제거 완료."
+            return False, f"failed to clean settings.json {event} (only standard-path entries are removed)."
+    return True, "Standard-path dingdong notification removed."
 
 
 # ===========================================================================
@@ -856,7 +856,7 @@ class _AdvisorModalBase(ModalScreen[bool]):
     TITLE: str = ""
     META: str = ""
     BODY_LINES: tuple[str, ...] = ()
-    INSTALL_LABEL: str = "지금 설치"
+    INSTALL_LABEL: str = "Install now"
     DISMISS_KEY: str = ""
 
     def _apply(self) -> tuple[bool, str]:
@@ -872,9 +872,9 @@ class _AdvisorModalBase(ModalScreen[bool]):
                 for line in self.BODY_LINES:
                     yield Static(line, classes="adv-line")
             with Horizontal(id="adv-btn-row"):
-                yield Button("다음에 안 함", id="adv-dismiss", variant="default")
+                yield Button("Don't ask again", id="adv-dismiss", variant="default")
                 yield Static("", classes="spacer")
-                yield Button("나중에", id="adv-later", variant="default")
+                yield Button("Later", id="adv-later", variant="default")
                 yield Button(self.INSTALL_LABEL, id="adv-install", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -883,7 +883,10 @@ class _AdvisorModalBase(ModalScreen[bool]):
             if self.DISMISS_KEY:
                 _set_dismissed(self.DISMISS_KEY, True)
             try:
-                self.app.notify("다시 안내하지 않습니다. 설정 → 권고 설치 탭에서 언제든 설치 가능합니다.", timeout=4)
+                self.app.notify(
+                    "This prompt will not be shown again. You can install later from Settings → Recommended Setup.",
+                    timeout=4,
+                )
             except Exception:
                 pass
             self.dismiss(False)
@@ -903,19 +906,19 @@ class _AdvisorModalBase(ModalScreen[bool]):
 
 
 class ClaudeSlashInstallScreen(_AdvisorModalBase):
-    TITLE = "📝 Claude /slim 슬래시 통합 설치"
-    META = "Claude TUI 안에서 /slim, /slim:dry 슬래시 명령을 사용할 수 있도록 자산을 설치합니다."
+    TITLE = "📝 Install Claude /slim Slash Integration"
+    META = "Installs assets so /slim and /slim:dry work inside the Claude TUI."
     BODY_LINES = (
-        "설치 항목:",
+        "Installed items:",
         "  ~/.claude/commands/slim.md",
         "  ~/.claude/commands/slim/dry.md",
         "  ~/.claude/hooks/slim-reload-intercept.sh",
         "  ~/.claude/settings.json — UserPromptSubmit hook entry (idempotent)",
         "",
-        "기존 settings.json 은 timestamped backup 으로 보존됩니다.",
-        "GccSlim TUI 가 떠 있을 때만 슬래시가 작동합니다.",
+        "The existing settings.json is preserved as a timestamped backup.",
+        "Slash commands work only while the GccSlim TUI is running.",
     )
-    INSTALL_LABEL = "지금 설치"
+    INSTALL_LABEL = "Install now"
     DISMISS_KEY = DISMISS_KEY_CLAUDE_SLASH
 
     def _apply(self) -> tuple[bool, str]:
@@ -923,15 +926,15 @@ class ClaudeSlashInstallScreen(_AdvisorModalBase):
 
 
 class CodexWrapperInstallScreen(_AdvisorModalBase):
-    TITLE = "🦊 Codex slim wrapper 통합"
-    META = "Codex 세션에서 slim 자동 reload 가 가능하도록 ~/.local/bin/codex wrapper 를 설치합니다."
+    TITLE = "🦊 Codex Slim Wrapper Integration"
+    META = "Installs the ~/.local/bin/codex wrapper for automatic slim reload in Codex sessions."
     BODY_LINES = (
-        "현재 release 에서는 준비 중입니다.",
-        "다음 release 에서 codex-integration/ 자산이 동봉됩니다.",
+        "This release does not include the automatic installer yet.",
+        "A later release will bundle codex-integration/ assets.",
         "",
-        "그동안은 'Codex 의 slim 자동 reload' 기능 없이 기본 codex 만 사용됩니다.",
+        "Until then, plain codex is used without automatic Codex slim reload.",
     )
-    INSTALL_LABEL = "준비 중"
+    INSTALL_LABEL = "Coming soon"
     DISMISS_KEY = DISMISS_KEY_CODEX_WRAPPER
 
     def _apply(self) -> tuple[bool, str]:
@@ -939,18 +942,18 @@ class CodexWrapperInstallScreen(_AdvisorModalBase):
 
 
 class DingdongInstallScreen(_AdvisorModalBase):
-    TITLE = "🔔 딩동댕 알림 설치 (권고)"
-    META = "Claude 답변이 끝나면 짧은 차임벨 (솔–미–도) 을 재생합니다. 선택 사항입니다."
+    TITLE = "🔔 Install Dingdong Notification (Recommended)"
+    META = "Plays a short chime after a Claude answer finishes. Optional."
     BODY_LINES = (
-        "설치 항목:",
+        "Installed items:",
         "  ~/.local/share/gccslim/dingdong.sh  (sample)",
         "  ~/.claude/settings.json — Stop hook entry (idempotent)",
         "",
-        "Linux: aplay + python3 + numpy 필요.",
-        "macOS: afplay (기본 내장) 사용.",
-        "의존성이 없으면 hook 이 silent exit — 다른 동작에 영향 없음.",
+        "Linux: requires aplay + python3 + numpy.",
+        "macOS: uses the built-in afplay.",
+        "If dependencies are missing, the hook exits silently and does not affect other behavior.",
     )
-    INSTALL_LABEL = "지금 설치"
+    INSTALL_LABEL = "Install now"
     DISMISS_KEY = DISMISS_KEY_DINGDONG
 
     def _apply(self) -> tuple[bool, str]:
@@ -1000,7 +1003,7 @@ def maybe_show_dingdong_modal(app) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Status summary — used by the Settings "권고 설치" tab to render cards.
+# Status summary — used by the Settings "Recommended Setup" tab to render cards.
 # ---------------------------------------------------------------------------
 
 def install_status_summary() -> dict:

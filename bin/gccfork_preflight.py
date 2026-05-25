@@ -1,26 +1,26 @@
-"""🛡️ 자동 슬림 사전 검증 (preflight) — gccfork 사이드카.
+"""Automatic slim preflight checks for gccfork.
 
-slim-and-reload spawn 전에 9개 체크를 **병렬** 실행. 어느 하나라도 fail 하면
-spawn 거절 → e327/654e 같은 buffer fork 잔존 + jsonl 손상 같은 부작용 회피.
+Runs safety checks in parallel before spawning slim-and-reload. If any check
+fails, spawning is denied to avoid stale buffer forks and JSONL corruption.
 
-CLAUDE 메모리: feedback_module_separation.md (모듈 분리 정책).
+Related internal design note: feedback_module_separation.md.
 
-체크 항목 (1~9):
-  1. claude busy           — jsonl mtime + /proc/<pid>/io read_bytes 5초 윈도
-  2. tool_use orphan       — jsonl 끝 30라인에 미완 tool_use → tool_result 매칭
-  3. jsonl flock           — fcntl LOCK_EX | LOCK_NB 시도 (상시 못 잡으면 누가 쓰는 중)
-  4. spawn lock            — ~/.claude/gccfork-locks/<sid>.lock 동시 spawn 가드
-  5. inject backlog        — INJECT_DIR 에 처리 안 된 옛 요청 N개 이상이면 거절
-  6. session lock 신선도   — sessions/<PID>.json mtime > 5분 = 좀비 의심
-  7. disk 여유              — statvfs free >= jsonl size × 3 (.bak + new + buffer)
-  8. single_pid            — 같은 sid 의 살아있는 claude PID 가 2개 이상이면 fail
-  9. binary_version        — 같은 sid PID 들이 binary version 혼재 (옛 좀비) 면 fail
+Checks:
+  1. claude busy           — JSONL mtime plus /proc/<pid>/io heuristic
+  2. tool_use orphan       — unfinished tool_use without matching tool_result
+  3. jsonl flock           — fcntl LOCK_EX | LOCK_NB probe
+  4. spawn lock            — ~/.claude/gccfork-locks/<sid>.lock guard
+  5. inject backlog        — too many unprocessed inject requests
+  6. session lock freshness — stale sessions/<PID>.json suggests a zombie
+  7. disk space            — free bytes >= jsonl size × 3
+  8. single_pid            — fail if more than one live claude PID owns sid
+  9. binary_version        — fail if live PIDs for sid use mixed versions
 
-각 체크는 결과 dict 반환:
+Each check returns:
   {"ok": bool, "name": str, "reason": str|None, "elapsed_ms": float}
 
-병렬 runner `run_preflight(sid, jsonl_path, claude_pid) -> PreflightResult`
-가 ThreadPoolExecutor 로 동시 호출 + max(elapsed) 만큼만 소요.
+The parallel runner `run_preflight(sid, jsonl_path, claude_pid)` uses
+ThreadPoolExecutor, so total time is close to the slowest single check.
 """
 from __future__ import annotations
 import json
@@ -63,7 +63,7 @@ class PreflightResult(NamedTuple):
 
 
 # ════════════════════════════════════════════════════════════════════
-# 개별 체크 (각각 ~ms 단위, 병렬 실행)
+# Individual checks. Each is normally millisecond-scale and runs in parallel.
 # ════════════════════════════════════════════════════════════════════
 
 def _timed(name: str, fn, *args, **kwargs) -> CheckResult:
@@ -77,20 +77,20 @@ def _timed(name: str, fn, *args, **kwargs) -> CheckResult:
 
 def check_busy(jsonl_path: Path, claude_pid: int,
                idle_window_sec: float = 5.0) -> tuple[bool, Optional[str]]:
-    """1. claude busy 감지 — jsonl mtime + /proc IO read_bytes 둘 다 검사."""
+    """Detect active Claude output using JSONL mtime and a /proc IO heuristic."""
     try:
         mtime_age = time.time() - jsonl_path.stat().st_mtime
         if mtime_age < idle_window_sec:
-            return False, f"jsonl mtime 신선 ({mtime_age:.1f}s 전 — 응답 진행 중 의심)"
+            return False, f"jsonl mtime is fresh ({mtime_age:.1f}s ago; response may be active)"
     except OSError as exc:
-        return False, f"stat 실패: {exc}"
-    # /proc/<pid>/io read_bytes 단발 검사 — 정확하진 않지만 매우 빠른 휴리스틱
+        return False, f"stat failed: {exc}"
+    # One-shot /proc/<pid>/io read_bytes probe. It is not exact but very cheap.
     try:
         io_path = Path(f"/proc/{claude_pid}/io")
         if io_path.exists():
             data = io_path.read_text()
-            # read_bytes 변화 추적은 두 번 호출이 필요. 단발 검사는 skip.
-            # 추후: 짧은 sleep 후 두 번 stat 으로 변화 감지. 지금은 mtime 만으로 충분.
+            # Tracking read_bytes changes needs two samples. Keep mtime as the
+            # main cheap signal for now.
             _ = data
     except OSError:
         pass
@@ -98,16 +98,16 @@ def check_busy(jsonl_path: Path, claude_pid: int,
 
 
 def check_tool_use_orphan(jsonl_path: Path) -> tuple[bool, Optional[str]]:
-    """2. jsonl 끝 30라인에 tool_use 가 있는데 대응 tool_result 가 없으면 답변 진행 중."""
+    """Detect unfinished tool_use blocks near the JSONL tail."""
     try:
         size = jsonl_path.stat().st_size
         with jsonl_path.open("rb") as fh:
-            seek_pos = max(0, size - 65536)  # 끝 64KB 면 30라인 이상 충분
+            seek_pos = max(0, size - 65536)  # Tail 64KB is enough for 30+ lines.
             fh.seek(seek_pos)
             tail = fh.read().decode("utf-8", errors="ignore")
         lines = tail.splitlines()[-30:]
     except OSError as exc:
-        return False, f"jsonl read 실패: {exc}"
+        return False, f"jsonl read failed: {exc}"
 
     pending_tool_use_ids: set[str] = set()
     for line in lines:
@@ -131,46 +131,46 @@ def check_tool_use_orphan(jsonl_path: Path) -> tuple[bool, Optional[str]]:
                     if tu_id:
                         pending_tool_use_ids.discard(tu_id)
     if pending_tool_use_ids:
-        return False, f"미완 tool_use {len(pending_tool_use_ids)}개 (답변 진행 중)"
+        return False, f"{len(pending_tool_use_ids)} unfinished tool_use block(s); response may be active"
     return True, None
 
 
 def check_jsonl_flock(jsonl_path: Path) -> tuple[bool, Optional[str]]:
-    """3. jsonl 에 LOCK_EX|LOCK_NB 시도 — 다른 process 가 잡고 있으면 fail."""
+    """Try LOCK_EX|LOCK_NB on the JSONL; fail if another process holds it."""
     try:
         fd = os.open(str(jsonl_path), os.O_RDONLY)
     except OSError as exc:
-        return False, f"open 실패: {exc}"
+        return False, f"open failed: {exc}"
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(fd, fcntl.LOCK_UN)
         except BlockingIOError:
-            return False, "다른 process 가 jsonl 점유 중 (claude 가 쓰는 중)"
+            return False, "another process holds the JSONL; Claude may be writing"
         except OSError as exc:
-            return False, f"flock 실패: {exc}"
+            return False, f"flock failed: {exc}"
         return True, None
     finally:
         os.close(fd)
 
 
 def check_spawn_lock(sid: str, hold: bool = False) -> tuple[bool, Optional[str]]:
-    """4. spawn lock — ~/.claude/gccfork-locks/<sid>.lock 동시 spawn 가드.
+    """Acquire the per-session spawn lock.
 
-    `hold=False` (기본) — try-only, 점유 안 함. preflight 단계.
-    `hold=True` — 점유 유지. 슬림 진입 직전 호출.
+    `hold=False` is try-only for preflight. `hold=True` keeps the lock and is
+    used immediately before entering slim.
     """
     SPAWN_LOCK_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = SPAWN_LOCK_DIR / f"{sid}.lock"
     try:
         fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as exc:
-        return False, f"lock open 실패: {exc}"
+        return False, f"lock open failed: {exc}"
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return False, f"이미 다른 spawn 진행 중 ({sid[:8]})"
+            return False, f"another spawn is already in progress ({sid[:8]})"
         if not hold:
             fcntl.flock(fd, fcntl.LOCK_UN)
         return True, None
@@ -180,9 +180,9 @@ def check_spawn_lock(sid: str, hold: bool = False) -> tuple[bool, Optional[str]]
 
 
 def check_inject_backlog(threshold: int = 20) -> tuple[bool, Optional[str]]:
-    """5. inject backlog — INJECT_DIR 에 미처리 요청이 너무 많으면 fail.
+    """Fail if too many stale inject requests are queued.
 
-    실시간 polling 은 spawn 직후 단계에서 별도 처리. preflight 에선 backlog 만.
+    Real-time polling is handled after spawn; preflight only checks backlog.
     """
     if not INJECT_DIR.exists():
         return True, None
@@ -190,26 +190,26 @@ def check_inject_backlog(threshold: int = 20) -> tuple[bool, Optional[str]]:
         pending = [f for f in INJECT_DIR.glob("*.json")
                    if not f.name.startswith(".claimed-")]
         if len(pending) >= threshold:
-            return False, f"inject backlog {len(pending)}개 (>= {threshold})"
+            return False, f"inject backlog {len(pending)} (>= {threshold})"
     except OSError as exc:
-        return False, f"INJECT_DIR scan 실패: {exc}"
+        return False, f"INJECT_DIR scan failed: {exc}"
     return True, None
 
 
 def check_session_lock_freshness(claude_pid: int,
                                   stale_sec: float = 300.0) -> tuple[bool, Optional[str]]:
-    """6. session lock (sessions/<PID>.json) mtime 이 stale_sec 이상이면 좀비 의심."""
+    """Check sessions/<PID>.json freshness; stale files suggest zombies."""
     lock_path = SESSIONS_DIR / f"{claude_pid}.json"
     if not lock_path.exists():
-        return False, f"sessions/{claude_pid}.json 부재 (claude 인스턴스 죽음 의심)"
+        return False, f"sessions/{claude_pid}.json is missing; Claude may be dead"
     if not Path(f"/proc/{claude_pid}").exists():
-        return False, f"PID {claude_pid} 프로세스 부재 (좀비 lock)"
+        return False, f"PID {claude_pid} is missing; zombie lock"
     try:
         age = time.time() - lock_path.stat().st_mtime
         if age > stale_sec:
-            return False, f"session lock {age/60:.1f}분 전 갱신 (좀비 의심)"
+            return False, f"session lock was updated {age/60:.1f} minutes ago; zombie suspected"
     except OSError as exc:
-        return False, f"stat 실패: {exc}"
+        return False, f"stat failed: {exc}"
     return True, None
 
 
@@ -217,10 +217,10 @@ _VERSION_RE = re.compile(r"/versions/([0-9]+\.[0-9]+\.[0-9]+)(?:/|$)")
 
 
 def _holders_for_sid(sid: str) -> list[tuple[int, str]]:
-    """sessions/<PID>.json 들 중 sid 와 일치하는 살아있는 (pid, version) 목록 반환.
+    """Return live (pid, version) holders for sid from sessions/<PID>.json.
 
-    version 은 /proc/<pid>/exe 의 .../versions/<X.Y.Z>/... 패턴에서 추출.
-    추출 실패 시 빈 문자열.
+    The version is extracted from the .../versions/<X.Y.Z>/... segment in
+    /proc/<pid>/exe. If extraction fails, version is an empty string.
     """
     if not SESSIONS_DIR.exists():
         return []
@@ -257,48 +257,49 @@ def _holders_for_sid(sid: str) -> list[tuple[int, str]]:
 
 
 def check_single_pid_per_sid(sid: str) -> tuple[bool, Optional[str]]:
-    """8. 같은 sid 의 살아있는 claude PID 가 1개 초과면 fail.
+    """Fail if more than one live Claude PID owns the same sid.
 
-    좀비 fork (옛 vscode 창 잔존 등) 가 같은 jsonl 동시 쓰면 chord race + 폭발.
+    Stale forks from old VSCode windows can write the same JSONL concurrently,
+    causing chord races and corruption.
     """
     holders = _holders_for_sid(sid)
     if len(holders) > 1:
         pid_list = ", ".join(f"{p}({v or '?'})" for p, v in holders)
-        return False, f"sid {sid[:8]} PID 다중 점유 {len(holders)}개: {pid_list}"
+        return False, f"sid {sid[:8]} is held by {len(holders)} PIDs: {pid_list}"
     return True, None
 
 
 def check_binary_version_consistency(sid: str) -> tuple[bool, Optional[str]]:
-    """9. 같은 sid PID 들이 모두 동일 claude binary version 인지.
+    """Check that all live PIDs for sid use the same Claude binary version.
 
-    옛 binary 좀비 + 새 binary 동거 시 chord/atomic schema 가 다르면 손상.
+    Mixed old/new binaries can disagree on chord or atomic schemas.
     """
     holders = _holders_for_sid(sid)
     if len(holders) <= 1:
-        return True, None  # single_pid 가 별도 잡거나 정상
+        return True, None  # single_pid catches this separately, or it is normal.
     versions = {v for _, v in holders if v}
     if len(versions) > 1:
-        return False, f"binary version 혼재 {sorted(versions)} (옛 좀비 의심)"
+        return False, f"mixed binary versions {sorted(versions)}; stale zombie suspected"
     return True, None
 
 
 def check_disk_space(jsonl_path: Path, multiplier: float = 3.0) -> tuple[bool, Optional[str]]:
-    """7. disk 여유 — jsonl size × multiplier (.bak + 새 jsonl + buffer)."""
+    """Check free disk space for backup, new JSONL, and buffer."""
     try:
         jsonl_size = jsonl_path.stat().st_size
         st = os.statvfs(str(jsonl_path.parent))
         free_bytes = st.f_bavail * st.f_frsize
         required = int(jsonl_size * multiplier)
         if free_bytes < required:
-            return False, (f"disk 부족: 필요 {required/1024/1024:.1f}MB, "
-                            f"가용 {free_bytes/1024/1024:.1f}MB")
+            return False, (f"insufficient disk: need {required/1024/1024:.1f}MB, "
+                            f"available {free_bytes/1024/1024:.1f}MB")
     except OSError as exc:
-        return False, f"statvfs 실패: {exc}"
+        return False, f"statvfs failed: {exc}"
     return True, None
 
 
 # ════════════════════════════════════════════════════════════════════
-# 병렬 runner
+# Parallel runner
 # ════════════════════════════════════════════════════════════════════
 
 def run_preflight(
@@ -312,9 +313,9 @@ def run_preflight(
     session_lock_stale_sec: float = 300.0,
     disk_multiplier: float = 3.0,
 ) -> PreflightResult:
-    """7개 체크 병렬 실행. 어느 하나라도 fail 하면 ok=False.
+    """Run checks in parallel. ok=False if any check fails.
 
-    `skip`: 건너뛸 체크 이름 set (예: {"disk"}).
+    `skip` is a set of check names to skip, for example {"disk"}.
     """
     skip = skip or set()
     jobs = []
@@ -346,7 +347,7 @@ def run_preflight(
         for fut in as_completed(futs):
             results.append(fut.result())
 
-    # 안정 표시 위해 이름 순 정렬
+    # Sort by stable display order.
     order = ["busy", "tool_use_orphan", "jsonl_flock", "spawn_lock",
              "inject_backlog", "session_lock", "disk",
              "single_pid", "binary_version"]
@@ -357,11 +358,11 @@ def run_preflight(
 
 
 # ════════════════════════════════════════════════════════════════════
-# spawn lock 점유 컨텍스트 — slim 진입 직전 wrap
+# Spawn lock context used immediately before entering slim.
 # ════════════════════════════════════════════════════════════════════
 
 class spawn_lock_holder:
-    """with spawn_lock_holder(sid): ... — flock 점유, 종료 시 해제."""
+    """Hold the per-session flock and release it on exit."""
     def __init__(self, sid: str):
         self.sid = sid
         self.fd: Optional[int] = None
@@ -375,7 +376,7 @@ class spawn_lock_holder:
         except BlockingIOError:
             os.close(self.fd)
             self.fd = None
-            raise RuntimeError(f"spawn lock 이미 점유 중: {self.sid[:8]}")
+            raise RuntimeError(f"spawn lock is already held: {self.sid[:8]}")
         return self
 
     def __exit__(self, exc_type, exc, tb):

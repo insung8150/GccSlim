@@ -49,6 +49,21 @@ SLIM_MODE_DEFAULT_KEEP_RECENT = {
     "strong": 3,
 }
 
+DEFAULT_COMPACT_TOP_LEVEL_TYPES = ("compacted",)
+DEFAULT_COMPACT_EVENT_TYPES = (
+    "context_compacted",
+    "compact_summary",
+    "conversation_compacted",
+    "auto_compacted",
+)
+DEFAULT_COMPACT_TEXT_KEYS = (
+    "message",
+    "summary",
+    "text",
+    "content",
+    "compact_summary",
+)
+
 
 @dataclass(frozen=True)
 class JsonlRow:
@@ -65,6 +80,13 @@ class SlimStats:
 
 
 @dataclass(frozen=True)
+class RecentTurnReport:
+    turn_no: int
+    original_bytes: int
+    slim_bytes: int
+
+
+@dataclass(frozen=True)
 class SlimPlan:
     session_id: str
     session_file: Path
@@ -76,11 +98,15 @@ class SlimPlan:
     dropped_lines: int
     mode: str
     keep_recent: int
+    trim_recent_tools: bool
     total_user_turns: int
     stats: SlimStats
     backup_path: Path
     slim_rows: list[bytes]
     compact_summary_count: int = 0
+    compact_detected_types: tuple[str, ...] = ()
+    compact_unknown_types: tuple[str, ...] = ()
+    recent_turn_reports: tuple[RecentTurnReport, ...] = ()
 
     @property
     def saved_bytes(self) -> int:
@@ -181,7 +207,7 @@ def _session_id_from_rows(rows: list[JsonlRow]) -> str:
         session_id = payload.get("id")
         if isinstance(session_id, str) and session_id:
             return session_id
-    raise ValueError("session_meta.payload.id를 찾지 못했습니다.")
+    raise ValueError("session_meta.payload.id was not found.")
 
 
 def _cwd_from_rows(rows: list[JsonlRow]) -> str | None:
@@ -238,49 +264,151 @@ def _content_with_replaced_text(content: Any, text: str) -> list[dict[str, Any]]
     return [{"type": "input_text", "text": text}]
 
 
-def normalize_slim_mode(mode: str) -> str:
-    normalized = SLIM_MODE_ALIASES.get(str(mode or "").strip(), "")
-    if not normalized:
-        raise ValueError(f"mode는 safe/strong 중 하나여야 합니다: {mode!r}")
-    return normalized
+def _load_project_prefs(cwd: str | None) -> dict[str, Any]:
+    if not cwd:
+        return {}
+    path = Path(cwd).expanduser() / ".gccfork" / "ccfork-prefs.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def _extract_compacted_message(obj: dict[str, Any]) -> str:
-    if obj.get("type") != "compacted":
+def _list_pref(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        parts = re.split(r"[\s,]+", value)
+    elif isinstance(value, list):
+        parts = [str(item) for item in value]
+    else:
+        parts = [str(value)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts:
+        item = part.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return tuple(out)
+
+
+def _merge_key_lists(*lists: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for values in lists:
+        for value in values:
+            item = str(value).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+    return tuple(out)
+
+
+def _extract_compact_text_from_value(value: Any, text_keys: tuple[str, ...]) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        text = _extract_text(value)
+        if text:
+            return text
+        for item in value:
+            text = _extract_compact_text_from_value(item, text_keys)
+            if text:
+                return text
         return ""
-    payload = obj.get("payload")
-    if not isinstance(payload, dict):
+    if not isinstance(value, dict):
         return ""
-    message = payload.get("message")
-    if isinstance(message, str):
-        return message.strip()
+    for key in text_keys:
+        if key in value:
+            text = _extract_compact_text_from_value(value.get(key), text_keys)
+            if text:
+                return text
     return ""
 
 
-def _compacted_summary_rows(rows: list[JsonlRow]) -> tuple[list[bytes], int]:
-    summaries: list[tuple[str, str]] = []
+def normalize_slim_mode(mode: str) -> str:
+    normalized = SLIM_MODE_ALIASES.get(str(mode or "").strip(), "")
+    if not normalized:
+        raise ValueError(f"mode must be one of safe/strong: {mode!r}")
+    return normalized
+
+
+def _extract_compacted_message(
+    obj: dict[str, Any],
+    *,
+    compact_top_level_types: tuple[str, ...],
+    compact_event_types: tuple[str, ...],
+    compact_text_keys: tuple[str, ...],
+) -> tuple[str, str, bool]:
+    row_type = str(obj.get("type") or "")
+    payload = obj.get("payload")
+    if row_type in compact_top_level_types:
+        text = _extract_compact_text_from_value(payload, compact_text_keys)
+        return text, row_type, True
+    if row_type == "event_msg" and isinstance(payload, dict):
+        event_type = str(payload.get("type") or "")
+        if event_type in compact_event_types:
+            text = _extract_compact_text_from_value(payload, compact_text_keys)
+            return text, event_type, True
+        if "compact" in event_type or "summary" in event_type:
+            return "", event_type, False
+    return "", "", False
+
+
+def _compacted_summary_rows(
+    rows: list[JsonlRow],
+    *,
+    cwd: str | None,
+) -> tuple[list[bytes], int, tuple[str, ...], tuple[str, ...]]:
+    prefs = _load_project_prefs(cwd)
+    compact_top_level_types = DEFAULT_COMPACT_TOP_LEVEL_TYPES
+    compact_event_types = _merge_key_lists(
+        DEFAULT_COMPACT_EVENT_TYPES,
+        _list_pref(prefs.get("codex_slim_compact_event_types")),
+    )
+    compact_text_keys = _merge_key_lists(
+        DEFAULT_COMPACT_TEXT_KEYS,
+        _list_pref(prefs.get("codex_slim_compact_text_keys")),
+    )
+
+    summaries: list[tuple[str, str, str]] = []
+    detected_types: set[str] = set()
+    unknown_types: set[str] = set()
     for row in rows:
         obj = row.obj
         if not isinstance(obj, dict):
             continue
-        message = _extract_compacted_message(obj)
+        message, source_type, recognized = _extract_compacted_message(
+            obj,
+            compact_top_level_types=compact_top_level_types,
+            compact_event_types=compact_event_types,
+            compact_text_keys=compact_text_keys,
+        )
+        if source_type and recognized:
+            detected_types.add(source_type)
+        elif source_type:
+            unknown_types.add(source_type)
         if not message:
             continue
         timestamp = str(obj.get("timestamp") or f"line {row.line_no}")
-        summaries.append((timestamp, message))
+        summaries.append((timestamp, source_type, message))
     if not summaries:
-        return [], 0
+        return [], 0, tuple(sorted(detected_types)), tuple(sorted(unknown_types))
 
     parts = [
-        "# Codex 이전 compact/압축 요약 모음",
+        "# Accumulated Codex compact summaries",
         "",
-        "이 메시지는 GccSlim Codex slim이 JSONL의 compacted.payload.message를 시간순으로 모아 새 컨텍스트 앞에 넣은 것입니다.",
-        "아래 요약들은 과거 자동 압축 때 모델에 동적으로 주입되던 내용을 복구 가능한 평문 컨텍스트로 보존합니다.",
+        "GccSlim Codex slim collected JSONL compact summary text in chronological order and placed it at the front of the new context.",
+        "These summaries preserve, as recoverable plaintext context, content that Codex previously injected dynamically during automatic compaction.",
     ]
-    for index, (timestamp, message) in enumerate(summaries, start=1):
+    for index, (timestamp, source_type, message) in enumerate(summaries, start=1):
         parts.extend([
             "",
-            f"## 압축 요약 #{index} ({timestamp})",
+            f"## Compact summary #{index} ({timestamp}, source={source_type})",
             "",
             message,
         ])
@@ -299,7 +427,12 @@ def _compacted_summary_rows(rows: list[JsonlRow]) -> tuple[list[bytes], int]:
             "count": len(summaries),
         },
     }
-    return [_dump_jsonl({"type": "response_item", "payload": payload})], len(summaries)
+    return (
+        [_dump_jsonl({"type": "response_item", "payload": payload})],
+        len(summaries),
+        tuple(sorted(detected_types)),
+        tuple(sorted(unknown_types)),
+    )
 
 
 def _stub_message_payload(payload: dict[str, Any], *, mode: str) -> dict[str, Any] | None:
@@ -434,14 +567,46 @@ def _recent_row_verdict(
     mode: str,
     turn_no: int,
     latest_turn: int,
+    trim_recent_tools: bool,
 ) -> tuple[str, bytes | None]:
     obj = row.obj
     if obj is None:
         return ("DROP", None)
 
+    if trim_recent_tools:
+        typ = obj.get("type")
+        payload = obj.get("payload")
+        if typ == "event_msg" and isinstance(payload, dict):
+            event_type = payload.get("type")
+            if event_type in {"user_message", "agent_message", "task_complete"}:
+                stubbed_payload = _stub_event_msg_payload(payload, mode=mode)
+                if stubbed_payload is payload:
+                    return ("KEEP", row.raw)
+                if stubbed_payload is not None:
+                    new_obj = dict(obj)
+                    new_obj["payload"] = stubbed_payload
+                    return ("STUB", _dump_jsonl(new_obj))
+            return ("DROP", None)
+        if typ == "response_item":
+            if not isinstance(payload, dict) or payload.get("type") != "message":
+                return ("DROP", None)
+            role = payload.get("role")
+            if role not in {"system", "developer", "user", "assistant"}:
+                return ("DROP", None)
+            stubbed_payload = _stub_message_payload(payload, mode=mode)
+            if stubbed_payload is payload:
+                return ("KEEP", row.raw)
+            if stubbed_payload is not None:
+                new_obj = dict(obj)
+                new_obj["payload"] = stubbed_payload
+                return ("STUB", _dump_jsonl(new_obj))
+        if typ == "session_meta":
+            return ("KEEP", row.raw)
+        return ("DROP", None)
+
     # Recent turns are the TUI replay surface. Keep their event/tool/turn_context
-    # rows intact; dropping "non-semantic" events can make `codex resume` open
-    # the session but render an empty transcript.
+    # rows intact only when explicitly requested; otherwise tool output in recent
+    # turns can dominate the context and make `/slim` ineffective.
     return ("KEEP", row.raw)
 
 
@@ -457,7 +622,7 @@ def find_latest_session_file(codex_root: Path | None = None) -> Path:
     root = (codex_root or CODEX_ROOT) / "sessions"
     candidates = list(root.glob("*/*/*/*.jsonl"))
     if not candidates:
-        raise FileNotFoundError(f"Codex 세션 파일이 없습니다: {root}")
+        raise FileNotFoundError(f"No Codex session files found: {root}")
     return max(candidates, key=lambda path: path.stat().st_mtime_ns)
 
 
@@ -465,10 +630,10 @@ def find_session_file_by_id(session_id: str, codex_root: Path | None = None) -> 
     root = (codex_root or CODEX_ROOT) / "sessions"
     matches = [path for path in root.glob("*/*/*/*.jsonl") if session_id in path.name]
     if not matches:
-        raise FileNotFoundError(f"session_id={session_id!r} 세션 파일이 없습니다.")
+        raise FileNotFoundError(f"No session file found for session_id={session_id!r}.")
     if len(matches) > 1:
         joined = "\n".join(str(path) for path in matches)
-        raise FileExistsError(f"session_id={session_id!r} 매치가 여러 개입니다.\n{joined}")
+        raise FileExistsError(f"Multiple matches for session_id={session_id!r}.\n{joined}")
     return matches[0]
 
 
@@ -479,12 +644,13 @@ def build_slim_plan(
     keep_recent: int | None = None,
     codex_root: Path | None = None,
     include_compact_summaries: bool = True,
+    trim_recent_tools: bool = True,
 ) -> SlimPlan:
     mode = normalize_slim_mode(mode)
     if keep_recent is None:
         keep_recent = SLIM_MODE_DEFAULT_KEEP_RECENT[mode]
     if keep_recent < 1:
-        raise ValueError("keep_recent는 1 이상이어야 합니다.")
+        raise ValueError("keep_recent must be at least 1.")
 
     session_file = session_file.expanduser().resolve()
     rows = _load_jsonl_rows(session_file)
@@ -496,9 +662,16 @@ def build_slim_plan(
     latest_turn = total_turns
 
     slim_rows: list[bytes] = []
-    compact_rows, compact_summary_count = (
-        _compacted_summary_rows(rows) if include_compact_summaries else ([], 0)
+    compact_rows, compact_summary_count, compact_detected_types, compact_unknown_types = (
+        _compacted_summary_rows(rows, cwd=cwd) if include_compact_summaries else ([], 0, (), ())
     )
+    recent_original_bytes: dict[int, int] = {}
+    recent_slim_bytes: dict[int, int] = {}
+    for row in rows:
+        turn_no = turn_by_line.get(row.line_no, 0)
+        if turn_no >= recent_start:
+            recent_original_bytes[turn_no] = recent_original_bytes.get(turn_no, 0) + len(row.raw)
+
     compact_inserted = False
     kept = 0
     stubbed = 0
@@ -523,13 +696,16 @@ def build_slim_plan(
                 mode=mode,
                 turn_no=turn_no,
                 latest_turn=latest_turn,
+                trim_recent_tools=trim_recent_tools,
             )
             if verdict == "KEEP" and replacement is not None:
                 slim_rows.append(replacement)
+                recent_slim_bytes[turn_no] = recent_slim_bytes.get(turn_no, 0) + len(replacement)
                 kept += 1
                 continue
             if verdict == "STUB" and replacement is not None:
                 slim_rows.append(replacement)
+                recent_slim_bytes[turn_no] = recent_slim_bytes.get(turn_no, 0) + len(replacement)
                 stubbed += 1
                 continue
             dropped += 1
@@ -557,6 +733,14 @@ def build_slim_plan(
     backup_path = backup_dir / backup_name
     original_bytes = session_file.stat().st_size
     slim_bytes = sum(len(raw) for raw in slim_rows)
+    recent_turn_reports = tuple(
+        RecentTurnReport(
+            turn_no=turn_no,
+            original_bytes=recent_original_bytes.get(turn_no, 0),
+            slim_bytes=recent_slim_bytes.get(turn_no, 0),
+        )
+        for turn_no in sorted(recent_original_bytes)
+    )
 
     return SlimPlan(
         session_id=session_id,
@@ -569,11 +753,15 @@ def build_slim_plan(
         dropped_lines=len(rows) - len(slim_rows),
         mode=mode,
         keep_recent=keep_recent,
+        trim_recent_tools=trim_recent_tools,
         total_user_turns=total_turns,
         stats=SlimStats(kept=kept, stubbed=stubbed, dropped=dropped),
         backup_path=backup_path,
         slim_rows=slim_rows,
         compact_summary_count=compact_summary_count,
+        compact_detected_types=compact_detected_types,
+        compact_unknown_types=compact_unknown_types,
+        recent_turn_reports=recent_turn_reports,
     )
 
 
@@ -773,15 +961,15 @@ def find_codex_process_for_session(
             if proc.pid == target_pid:
                 if proc.session_id and proc.session_id != session_id:
                     raise RuntimeError(
-                        f"target PID {target_pid}는 다른 Codex 세션을 열고 있습니다: "
+                        f"target PID {target_pid} is attached to another Codex session: "
                         f"{proc.session_id} != {session_id}"
                     )
                 return proc
-        raise ProcessLookupError(f"target Codex PID를 찾지 못했습니다: {target_pid}")
+        raise ProcessLookupError(f"target Codex PID was not found: {target_pid}")
 
     matches = [proc for proc in processes if proc.session_id == session_id]
     if not matches:
-        raise ProcessLookupError(f"session_id={session_id} 실행 중인 Codex 프로세스를 찾지 못했습니다.")
+        raise ProcessLookupError(f"No running Codex process found for session_id={session_id}.")
 
     # If an accidental `codex resume <sid>` child exists, prefer the original
     # interactive process. This avoids writing the same session from two TUIs.
@@ -796,7 +984,7 @@ def find_codex_process_for_session(
         for proc in candidates
     )
     raise RuntimeError(
-        "대상 Codex 프로세스가 여러 개입니다. --target-pid로 하나를 지정하세요.\n" + detail
+        "Multiple target Codex processes were found. Specify one with --target-pid.\n" + detail
     )
 
 
@@ -812,9 +1000,9 @@ def _wait_process_on_session(pid: int, session_id: str, timeout_s: float) -> Cod
                 return proc
         time.sleep(0.05)
     if last is None:
-        raise TimeoutError(f"Codex PID {pid}가 사라졌습니다.")
+        raise TimeoutError(f"Codex PID {pid} disappeared.")
     raise TimeoutError(
-        f"Codex PID {pid}가 목표 세션을 열지 않았습니다: "
+        f"Codex PID {pid} did not open the target session: "
         f"current={last.session_id or '?'} target={session_id}"
     )
 
@@ -844,7 +1032,7 @@ def _wait_bridge_status(request_id: str, timeout_s: float) -> dict[str, Any]:
         time.sleep(0.05)
     if last_status:
         raise TimeoutError(f"bridge inject timeout: last_state={last_status.get('state')}")
-    raise TimeoutError("bridge inject timeout: status 없음")
+    raise TimeoutError("bridge inject timeout: no status")
 
 
 def reload_codex_session_in_place(
@@ -860,7 +1048,7 @@ def reload_codex_session_in_place(
     # open JSONL after injection; bridge ack alone only means "text was sent".
     proc = find_codex_process_for_session(session_id, target_pid=target_pid)
     if proc.ppid <= 1:
-        raise RuntimeError(f"Codex PID {proc.pid}의 shell PID를 확인하지 못했습니다.")
+        raise RuntimeError(f"Could not determine shell PID for Codex PID {proc.pid}.")
 
     request_id = f"codex-resume-{session_id[:8]}-{os.getpid()}-{int(time.time() * 1000)}"
     payload = {
@@ -895,7 +1083,7 @@ def reload_codex_session_in_place(
     status = _wait_bridge_status(request_id, timeout_s + 0.5)
     state = status.get("state")
     if state != "done":
-        raise RuntimeError(f"bridge inject 실패: {status}")
+        raise RuntimeError(f"bridge inject failed: {status}")
     verified = _wait_process_on_session(proc.pid, session_id, timeout_s)
     return {
         **status,
@@ -949,11 +1137,19 @@ def _resolve_session_file(args: argparse.Namespace) -> Path:
 def _print_plan(plan: SlimPlan) -> None:
     print(f"session_id: {plan.session_id}")
     print(f"session_file: {plan.session_file}")
-    print(f"cwd: {plan.cwd or '(없음)'}")
+    print(f"cwd: {plan.cwd or '(none)'}")
     print(f"user_turns: {plan.total_user_turns}")
     print(f"mode: {plan.mode}")
     print(f"keep_recent: {plan.keep_recent}")
+    print(f"trim_recent_tools: {plan.trim_recent_tools}")
     print(f"compact_summaries: {plan.compact_summary_count}")
+    print(
+        "compact_detected_types: "
+        + (", ".join(plan.compact_detected_types) if plan.compact_detected_types else "(none)")
+    )
+    if plan.compact_unknown_types:
+        print("compact_unknown_types: " + ", ".join(plan.compact_unknown_types))
+        print("hint: add unknown types to codex_slim_compact_event_types if they contain summary text")
     print(f"lines: {plan.original_lines} -> {plan.slim_lines}  (drop {plan.dropped_lines})")
     print(
         f"verdict: KEEP={plan.stats.kept}  "
@@ -963,80 +1159,95 @@ def _print_plan(plan: SlimPlan) -> None:
         f"size: {fmt_size(plan.original_bytes)} -> {fmt_size(plan.slim_bytes)}  "
         f"(save {fmt_size(plan.saved_bytes)}, {plan.saved_percent:.1f}%)"
     )
+    if plan.recent_turn_reports:
+        print("recent_raw_turns:")
+        for report in plan.recent_turn_reports:
+            saved = report.original_bytes - report.slim_bytes
+            print(
+                f"  turn {report.turn_no}: "
+                f"{fmt_size(report.original_bytes)} -> {fmt_size(report.slim_bytes)} "
+                f"(save {fmt_size(saved)})"
+            )
     print(f"backup: {plan.backup_path}")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Codex 세션 JSONL을 slim하고 선택적으로 현재 Codex TUI에 /resume을 주입합니다.",
+        description="Slim a Codex session JSONL and optionally inject /resume into the current Codex TUI.",
     )
-    parser.add_argument("--session-id", help="대상 Codex session id. 생략 시 최신 세션")
-    parser.add_argument("--session-file", type=Path, help="대상 Codex JSONL 파일")
+    parser.add_argument("--session-id", help="Target Codex session id. Defaults to the latest session.")
+    parser.add_argument("--session-file", type=Path, help="Target Codex JSONL file")
     parser.add_argument(
         "--codex-root",
         type=Path,
         default=CODEX_ROOT,
-        help="Codex root directory (기본: ~/.codex)",
+        help="Codex root directory (default: ~/.codex)",
     )
     parser.add_argument(
         "--mode",
         default="strong",
-        help="slim 강도: safe=10턴 보존, strong=3턴 보존. 옛 weak/medium은 safe, heavy-strong은 strong으로 해석",
+        help="Slim strength: safe keeps 10 turns, strong keeps 3 turns. Legacy weak/medium map to safe; heavy-strong maps to strong.",
     )
     parser.add_argument(
         "--keep-recent",
         type=int,
         default=None,
-        help="최근 사용자 턴 원본 보존 개수. 생략 시 --mode 기본값 사용",
+        help="Number of recent user turns to preserve as raw context. Defaults to the mode setting.",
     )
     parser.add_argument(
         "--include-compact-summaries",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="이전 compact/압축 요약 payload.message를 새 컨텍스트 앞에 누적 삽입",
+        help="Insert previous compacted payload.message summaries at the front of the new context.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="계획만 출력하고 파일은 바꾸지 않음")
-    parser.add_argument("--yes", action="store_true", help="확인 없이 적용")
+    parser.add_argument(
+        "--trim-recent-tools",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Also remove tool calls, tool outputs, token counts, and turn plumbing inside recent raw-protected turns.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print the plan only; do not modify files")
+    parser.add_argument("--yes", action="store_true", help="Apply without confirmation")
     parser.add_argument(
         "--in-place",
         action="store_true",
-        help="원본 session JSONL을 직접 덮어씀. 현재 기본값이며 호환용 옵션",
+        help="Overwrite the original session JSONL. This is the current default and kept for compatibility.",
     )
     parser.add_argument(
         "--clone",
         action="store_true",
-        help="원본을 보존하고 slim된 새 sid 복제본을 생성. 복구 실험용",
+        help="Preserve the original and create a slimmed clone with a new sid. Intended for recovery experiments.",
     )
     parser.add_argument(
         "--reload",
         action="store_true",
-        help="slim 후 재로딩. 기본은 실험적 in-place 주입이며 검증 실패 시 에러",
+        help="Reload after slim. Default path is experimental in-place injection and fails on verification errors.",
     )
     parser.add_argument(
         "--new-process",
         action="store_true",
-        help="--reload 시 기존 방식처럼 새 codex resume 프로세스를 실행",
+        help="With --reload, launch a new codex resume process instead of in-place injection.",
     )
     parser.add_argument(
         "--no-wait",
         action="store_true",
-        help="--reload 시 bridge ack 또는 새 프로세스 종료를 기다리지 않음",
+        help="With --reload, do not wait for bridge ack or the new process to exit.",
     )
     parser.add_argument(
         "--target-pid",
         type=int,
-        help="in-place reload 대상 Codex PID. 여러 Codex가 같은 session을 잡을 때 사용",
+        help="Target Codex PID for in-place reload when multiple Codex processes share a session.",
     )
     parser.add_argument(
         "--inject-timeout",
         type=float,
         default=5.0,
-        help="in-place bridge 주입 전체 제한 초 (기본: 5.0)",
+        help="Overall in-place bridge injection timeout in seconds (default: 5.0)",
     )
     parser.add_argument(
         "--resume-only",
         action="store_true",
-        help="실험적 in-place reload 시 /clear 없이 /resume만 주입",
+        help="For experimental in-place reload, inject only /resume without /clear.",
     )
     return parser.parse_args(argv)
 
@@ -1051,20 +1262,21 @@ def main(argv: list[str] | None = None) -> int:
             keep_recent=args.keep_recent,
             codex_root=args.codex_root,
             include_compact_summaries=args.include_compact_summaries,
+            trim_recent_tools=args.trim_recent_tools,
         )
     except Exception as exc:
-        print(f"오류: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     _print_plan(plan)
     if args.dry_run:
-        print("\n--dry-run: 실제 수정 없음")
+        print("\n--dry-run: no files modified")
         return 0
 
     if not args.yes:
-        answer = input("\n이대로 slim 할까요? [y/N] ").strip().lower()
+        answer = input("\nApply this slim plan? [y/N] ").strip().lower()
         if answer not in {"y", "yes"}:
-            print("취소했습니다.")
+            print("Cancelled.")
             return 0
 
     reload_session_id = plan.session_id
@@ -1073,18 +1285,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.clone:
             clone = apply_slim_plan_to_new_session(plan)
             reload_session_id = clone.cloned_session_id
-            print("\nslim clone 완료")
+            print("\nslim clone complete")
             print(f"source_session_id: {clone.source_session_id}")
             print(f"cloned_session_id: {clone.cloned_session_id}")
             print(f"cloned_file: {clone.cloned_file}")
-            print("원본 세션 파일은 수정하지 않았습니다.")
+            print("Original session file was not modified.")
         else:
             apply_slim_plan(plan)
-            print("\nslim 완료 (in-place)")
+            print("\nslim complete (in-place)")
             print(f"session_id: {plan.session_id}")
             print(f"backup: {plan.backup_path}")
     except Exception as exc:
-        print(f"slim 실패: {exc}", file=sys.stderr)
+        print(f"slim failed: {exc}", file=sys.stderr)
         return 1
 
     if args.reload:
@@ -1101,17 +1313,17 @@ def main(argv: list[str] | None = None) -> int:
                 resume_only=args.resume_only,
             )
         except Exception as exc:
-            print(f"in-place reload 실패: {exc}", file=sys.stderr)
-            print("필요하면 --target-pid <codex-pid> 또는 --new-process를 사용하세요.", file=sys.stderr)
+            print(f"in-place reload failed: {exc}", file=sys.stderr)
+            print("Use --target-pid <codex-pid> or --new-process if needed.", file=sys.stderr)
             return 1
         print(
-            "bridge inject 완료: "
+            "bridge inject complete: "
             f"state={status.get('state')} targetPid={status.get('targetPid')} "
             f"targetShellPid={status.get('targetShellPid')}"
         )
         return 0
 
-    print(f"\n재로딩 명령: codex resume {reload_session_id}")
+    print(f"\nReload command: codex resume {reload_session_id}")
     return 0
 
 
