@@ -1,31 +1,36 @@
-"""TUI 가 외부 (claude hook) 의 작업 요청을 polling 으로 받는 사이드카.
+"""Sidecar that lets the TUI poll work requests from external Claude hooks.
 
-포크_무조건확인.md 정책 구현:
+Implements the forced-confirmation policy:
 
-  claude hook 은 gccfork CLI 를 직접 spawn 하지 않는다 (self-injection race).
-  대신 ~/.claude/gccfork-tui-requests/<uuid>.json 으로 작업 요청만 publish 하고 종료.
-  TUI 가 떠 있으면 polling 으로 그 파일을 발견 → subprocess 로 작업 실행.
-  TUI 자체는 외부 process 이므로 spawn 해도 self-injection 발생 안 함.
+  The Claude hook does not spawn the gccfork CLI directly, avoiding the
+  self-injection race. Instead, it publishes a work request to
+  ~/.claude/gccfork-tui-requests/<uuid>.json and exits.
+  If the TUI is running, it discovers the file by polling and runs the work in
+  a subprocess. Because the TUI is an external process, spawning from it does
+  not cause self-injection.
 
-요청 파일 schema:
+Request file schema:
     {
         "version": 1,
         "ts": <epoch seconds>,
         "action": "slim-and-reload" | "slim" | "slim-dry",
         "sid": "<full session id>",
         "mode": "strong" | "medium" | "weak",
-        "source": "<누가 보냈는지>"  # 로그/디버그용
+        "source": "<sender>"  # for logging/debugging
     }
 
-처리 흐름:
-  1. _tui_request_poll_tick (1초마다)
-  2. TUI_REQUEST_DIR 의 *.json scan, mtime 5분 이내만 처리 (stale 차단)
-  3. 파일 lock (rename → .processing) 으로 다른 TUI 인스턴스와 race 방지
-  4. action dispatch → subprocess.Popen 으로 gccfork CLI 호출 (textual @work)
-  5. 처리 완료 → 파일 unlink, 사용자 notify
-  6. 실패 → .failed 로 rename + notify
+Processing flow:
+  1. _tui_request_poll_tick runs every second.
+  2. Scan *.json in TUI_REQUEST_DIR and process only files whose mtime is
+     within five minutes, blocking stale requests.
+  3. Use a file lock (rename to .processing) to avoid races with other TUI
+     instances.
+  4. Dispatch the action and call the gccfork CLI through subprocess.Popen
+     (Textual @work).
+  5. On success, unlink the file and notify the user.
+  6. On failure, rename to .failed and notify.
 
-CLAUDE 메모리: feedback_module_separation.md (사이드카 + Mixin).
+Claude memory reference: feedback_module_separation.md (sidecar + mixin).
 """
 
 from __future__ import annotations
@@ -42,15 +47,14 @@ from typing import Any, Optional
 TUI_REQUEST_DIR = Path.home() / ".claude" / "gccfork-tui-requests"
 # Cross-platform: resolve to $HOME at import time, no user-path hardcoding.
 GCCFORK_BIN = str(Path.home() / ".local" / "bin" / "gccfork")
-STALE_AFTER_SEC = 300  # 5분 지난 요청은 무시 (TUI 가 죽었다 살아난 경우 옛 요청 처리 방지)
+STALE_AFTER_SEC = 300  # ignore requests older than five minutes to avoid processing old work after TUI restart
 POLL_INTERVAL_SEC = 1.0
 
 
 class TuiRequestPollerMixin:
-    """GCCForkApp 에 mixin 으로 추가. on_mount 에서 _tui_request_poller_start() 호출.
+    """Mixin added to GCCForkApp. Call _tui_request_poller_start() from on_mount.
 
-    아래 set_interval / run_worker / notify attribute 는 textual.App 이 제공 —
-    mixin 정적 검사 통과를 위해 type hint 만 선언.
+    The set_interval / run_worker / notify attributes are provided by textual.App; they are declared only for static checks on this mixin.
     """
 
     set_interval: Any
@@ -58,14 +62,14 @@ class TuiRequestPollerMixin:
     notify: Any
 
     _tui_request_poller_timer = None
-    _tui_request_processing: set[str] = set()  # 처리 중인 file stem (중복 dispatch 방지)
+    _tui_request_processing: set[str] = set()  # file stems currently being processed, to avoid duplicate dispatch
 
     def _tui_request_poller_start(self) -> None:
-        """on_mount 에서 호출. polling timer 시작."""
+        """Called from on_mount to start the polling timer."""
         try:
             TUI_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
         except OSError:
-            return  # 디렉토리 못 만들면 polling 비활성 (조용히)
+            return  # disable polling quietly if the directory cannot be created
         if not hasattr(self, "_tui_request_processing") or self._tui_request_processing is None:
             self._tui_request_processing = set()
         self._tui_request_poller_timer = self.set_interval(
@@ -73,12 +77,12 @@ class TuiRequestPollerMixin:
         )
 
     def _tui_request_poll_tick(self) -> None:
-        """1초마다 호출. TUI_REQUEST_DIR scan 후 새 요청 발견 시 dispatch.
+        """Called every second. Scan TUI_REQUEST_DIR and dispatch new requests.
 
-        부수 효과: hook 이 안 읽고 죽은 stale .result 파일 5분 후 삭제.
+        Side effect: delete stale .result files after five minutes when the hook died before reading them.
         """
         now = time.time()
-        # stale .result cleanup (hook 폴링이 못 읽고 끝난 경우)
+        # stale .result cleanup when hook polling ended before reading it
         try:
             for r in TUI_REQUEST_DIR.glob("*.json.result"):
                 try:
@@ -93,7 +97,7 @@ class TuiRequestPollerMixin:
         except OSError:
             return
         for f in files:
-            # .result / .tmp / .processing / .failed / .stale 등은 skip
+            # skip .result / .tmp / .processing / .failed / .stale files
             if f.suffix != ".json":
                 continue
             stem = f.stem
@@ -103,7 +107,7 @@ class TuiRequestPollerMixin:
                 st = f.stat()
             except OSError:
                 continue
-            # stale 차단 — 5분 지난 요청은 무시
+            # stale guard: ignore requests older than five minutes
             if now - st.st_mtime > STALE_AFTER_SEC:
                 self._tui_request_archive(f, suffix=".stale")
                 continue
@@ -111,17 +115,17 @@ class TuiRequestPollerMixin:
             self._tui_request_dispatch(f)
 
     def _tui_request_dispatch(self, request_path: Path) -> None:
-        """request 파일 1개 처리. 파싱 → action handler 호출."""
+        """Process one request file: parse it and call the action handler."""
         try:
             data = json.loads(request_path.read_text())
         except Exception as exc:
             self._tui_request_archive(request_path, suffix=".failed")
-            self._tui_request_notify(f"❌ TUI request 파싱 실패: {exc}")
+            self._tui_request_notify(f"❌ TUI request parse failed: {exc}")
             return
 
         action = data.get("action", "")
         sid = data.get("sid", "")
-        mode = data.get("mode", "")          # "" 또는 누락 = prefs 기본값 사용
+        mode = data.get("mode", "")          # empty or missing means use prefs default
         source = data.get("source", "?")
         # cwd from /slim hook — used to read project-local prefs override
         # (<cwd>/.gccfork/ccfork-prefs.json). Falls back to TUI's own cwd.
@@ -129,11 +133,11 @@ class TuiRequestPollerMixin:
 
         if not sid or len(sid) < 8:
             self._tui_request_archive(request_path, suffix=".failed")
-            self._tui_request_notify(f"❌ TUI request: sid 없음/짧음 ({sid!r})")
+            self._tui_request_notify(f"❌ TUI request: missing/short sid ({sid!r})")
             return
 
-        # `/slim` 과 `/slim:dry` 둘 다 mode 없이 옴 → gccfork prefs 에서 결정.
-        # 모든 슬림 결정 로직은 여기 한 곳에. claude 는 메신저일 뿐.
+        # Both `/slim` and `/slim:dry` can arrive without mode, so gccfork prefs decide it.
+        # All slim decision logic lives here; Claude is only the messenger.
         chosen_turns = 5
         chosen_reload = True
         if action in ("slim-default", "slim-dry") or (action == "slim" and not mode):
@@ -175,7 +179,7 @@ class TuiRequestPollerMixin:
             mode = chosen_mode
             if action == "slim-default":
                 action = "slim-and-reload" if chosen_reload else "slim"
-            # slim-dry 는 그대로 유지 (아래 dispatch 에서 처리)
+            # keep slim-dry unchanged; dispatch below handles it
             keep_turns_arg = ["--keep-recent-turns", str(chosen_turns)]
             # Restore the TUI's own active project cwd
             if set_active_project_cwd and saved_cwd is not None:
@@ -186,7 +190,7 @@ class TuiRequestPollerMixin:
         else:
             keep_turns_arg = []
 
-        # action 별 명령 빌드 — 모두 gccfork CLI 직접 호출 (slim-now 래퍼는 turn 옵션 미지원)
+        # Build command per action. All commands call the gccfork CLI directly because the slim-now wrapper does not support turn options.
         argv: Optional[list[str]] = None
         if action == "slim-and-reload":
             argv = [
@@ -204,18 +208,17 @@ class TuiRequestPollerMixin:
             return
 
         self._tui_request_notify(
-            f"🔔 TUI request 수신: {action} (sid={sid[:8]}, mode={mode}, src={source})"
+            f"🔔 TUI request received: {action} (sid={sid[:8]}, mode={mode}, src={source})"
         )
-        # textual worker 로 subprocess 실행 (UI block 없음)
+        # run subprocess in a Textual worker so the UI does not block
         self._tui_request_run_command(request_path, argv, action, sid[:8])
 
     def _tui_request_run_command(
         self, request_path: Path, argv: list[str], action: str, sid_short: str
     ) -> None:
-        """textual worker (thread) 에서 subprocess 실행 후 결과 처리.
+        """Run subprocess in a Textual worker thread and process the result.
 
-        worker 데코레이터를 동적으로 import — textual.work 의 import 위치는 버전마다
-        조금씩 달라 try/except 로 fallback.
+        Import the worker decorator dynamically. The textual.work import location varies by version, so use a try/except fallback.
         """
         try:
             from textual import work
@@ -237,22 +240,22 @@ class TuiRequestPollerMixin:
                     text=True,
                 )
                 rc = proc.returncode
-                # stderr trace 라인 제거 (claude hook 노이즈 방지)
+                # remove stderr trace lines to avoid Claude hook noise
                 merged = (proc.stdout or "") + (proc.stderr or "")
                 stdout_text = "\n".join(
                     ln for ln in merged.splitlines() if not ln.lstrip().startswith("[sar")
                 )
-                # 디버그용 풀로그도 /tmp 에 보존
+                # also keep a full debug log under /tmp
                 try:
                     log_path.write_text(merged)
                 except OSError:
                     pass
             except subprocess.TimeoutExpired:
-                err_text = "타임아웃 (120s)"
+                err_text = "timeout (120s)"
             except Exception as exc:
-                err_text = f"예외: {exc}"
+                err_text = f"exception: {exc}"
 
-            # result write back — atomic rename. claude hook 이 폴링으로 읽음.
+            # write result back with atomic rename; the Claude hook reads it by polling
             self._tui_request_write_result(
                 result_path,
                 ok=(rc == 0 and not err_text),
@@ -263,21 +266,21 @@ class TuiRequestPollerMixin:
                 sid_short=sid_short,
             )
 
-            # 정상 종료 후엔 request 도 archive (성공=unlink, 실패=.failed)
+            # after completion, archive the request too: unlink on success, .failed on failure
             if rc == 0 and not err_text:
                 self._tui_request_archive(request_path, suffix=None)
-                self._tui_request_notify(f"✅ TUI request 완료: {action} sid={sid_short}")
+                self._tui_request_notify(f"✅ TUI request complete: {action} sid={sid_short}")
             else:
                 self._tui_request_archive(request_path, suffix=".failed")
                 tag = err_text or f"rc={rc}"
-                self._tui_request_notify(f"❌ TUI request 실패: {action} sid={sid_short} {tag}")
+                self._tui_request_notify(f"❌ TUI request failed: {action} sid={sid_short} {tag}")
             self._tui_request_processing.discard(request_path.stem)
 
         if work is not None:
-            # textual worker 로 격리. UI block 없음.
+            # isolate in a Textual worker; no UI block
             self.run_worker(_run, thread=True, exclusive=False)
         else:
-            # fallback — 같은 thread (UI 잠깐 멈춤)
+            # fallback: same thread, briefly blocks UI
             _run()
 
     def _tui_request_write_result(
@@ -291,9 +294,9 @@ class TuiRequestPollerMixin:
         error: str,
         sid_short: str,
     ) -> None:
-        """결과를 atomic 하게 write — claude hook 이 폴링으로 읽음.
+        """Write results atomically; the Claude hook reads them by polling.
 
-        스키마: { ok, action, rc, stdout, error, sid, ts }
+        Schema: { ok, action, rc, stdout, error, sid, ts }
         """
         payload = {
             "ok": ok,
@@ -315,9 +318,9 @@ class TuiRequestPollerMixin:
                 pass
 
     def _tui_request_archive(self, request_path: Path, suffix: Optional[str]) -> None:
-        """처리 끝난 파일 정리. suffix=None 이면 unlink, 있으면 rename.
+        """Clean up a processed file. suffix=None unlinks it; otherwise it is renamed.
 
-        .failed / .stale 은 디버그용으로 남기고, 성공은 깔끔하게 삭제.
+        .failed and .stale remain for debugging; successful files are deleted cleanly.
         """
         try:
             if suffix is None:
@@ -329,7 +332,7 @@ class TuiRequestPollerMixin:
             pass
 
     def _tui_request_notify(self, msg: str) -> None:
-        """TUI 화면 우상단에 notify. notify() 가 없으면 조용히 패스."""
+        """Notify at the top-right of the TUI. If notify() is unavailable, pass quietly."""
         try:
             self.notify(msg, timeout=4.0)
         except Exception:
@@ -337,12 +340,11 @@ class TuiRequestPollerMixin:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Helper — claude hook 쪽에서 쓸 수 있는 publish 함수
-# (intercept.sh 가 직접 jq + python3 로 처리하지만, 향후 hook 을 python 으로
-#  바꿀 때 사용)
+# Helper publish function for Claude hooks
+# (intercept.sh currently uses jq + python3 directly, but this is available if the hook moves to Python later)
 # ──────────────────────────────────────────────────────────────────────────
 def publish_tui_request(action: str, sid: str, mode: str = "strong", source: str = "claude-hook") -> Path:
-    """TUI request 파일 publish. atomic rename 으로 race 회피."""
+    """Publish a TUI request file. Atomic rename avoids races."""
     TUI_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,

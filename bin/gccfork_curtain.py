@@ -1,14 +1,14 @@
-"""TTY curtain — claude TUI 가 붙어 있는 PTY 자체에 alt screen 직접 write.
+"""TTY curtain — write the alternate screen directly to Claude's PTY.
 
-이전 gccfork_screen.py (제거됨) 가 우리 stderr 에 alt screen 을 적용해 효과 없었던
-교훈을 반영. 적용 위치 = **claude 의 /dev/pts/N**. terminal emulator (xterm.js)
-가 화면 버퍼 교체.
+This captures the lesson from the removed gccfork_screen.py: applying the
+alternate screen to our stderr has no effect. The write must target Claude's
+own /dev/pts/N so the terminal emulator (xterm.js) swaps the screen buffer.
 
-사용:
+Usage:
     with tty_curtain(claude_pid):
-        # /clear, /resume inject — alt screen 안에서만 textarea echo 발생
+        # /clear, /resume injection echoes only inside the alternate screen.
         ...
-    # 빠져나오면 main screen 복귀 → 안에서 그려진 textarea 자동 사라짐
+    # Returning to the main screen hides the temporary textarea echo.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ ALT_OFF = b"\x1b[?25h\x1b[?1049l"               # cursor show + main screen
 
 
 def find_claude_tty(claude_pid: int) -> Optional[str]:
-    """claude PID 의 controlling PTY 경로 찾기. /proc/<pid>/fd/1 readlink."""
+    """Return the controlling PTY path for a Claude PID via /proc/<pid>/fd/1."""
     try:
         path = os.readlink(f"/proc/{claude_pid}/fd/1")
     except OSError:
@@ -58,25 +58,25 @@ def wait_for_jsonl_idle(
     require_change: bool = True,
     log_fn=None,
 ) -> dict:
-    """jsonl 파일이 idle_secs 동안 size 변화 없으면 처리 완료로 간주.
+    """Treat the JSONL as complete after its size is stable for idle_secs.
 
     Args:
-        jsonl_path: monitor 대상 jsonl 절대 경로
-        idle_secs: 이 시간 동안 변경 없으면 idle 판정
-        max_wait: 전체 최대 대기 시간 (안전 상한)
-        poll_interval: 폴링 주기
-        require_change: True 면 진입 후 최소 1번 변경 보기 전엔 idle 판정 X.
-            본체 직후 wait 진입할 때 /resume hook 이 아직 시작도 안 했으면
-            jsonl 이 stable 상태 → 즉시 idle 오판 가능. 이걸 막음.
-        log_fn: 진단 로그 함수 (e.g. lambda msg: print(msg, file=sys.stderr))
+        jsonl_path: absolute path to the JSONL being monitored.
+        idle_secs: stable duration required before declaring idle.
+        max_wait: total wait ceiling.
+        poll_interval: polling interval.
+        require_change: if True, do not declare idle until at least one size
+            change has been seen after entry. This avoids a false idle when the
+            /resume hook has not started writing yet.
+        log_fn: diagnostic logger, e.g. lambda msg: print(msg, file=sys.stderr).
 
     Returns:
         dict: {
-            "elapsed": 실제 대기 시간,
-            "saw_change": 변경 1회 이상 봤는지,
-            "change_count": 변경 회수,
+            "elapsed": actual wait time,
+            "saw_change": whether at least one change was observed,
+            "change_count": number of changes,
             "size_start": baseline,
-            "size_end": 종료 시 크기,
+            "size_end": final size,
             "reason": "idle" | "max_wait" | "no_change",
         }
     """
@@ -90,7 +90,7 @@ def wait_for_jsonl_idle(
     last_change = start
     saw_change = False
     change_count = 0
-    log(f"  ⏳ jsonl-idle wait 시작: baseline={baseline:,}B path=...{jsonl_path[-40:]}")
+    log(f"  ⏳ jsonl-idle wait start: baseline={baseline:,}B path=...{jsonl_path[-40:]}")
 
     while time.monotonic() - start < max_wait:
         try:
@@ -102,14 +102,14 @@ def wait_for_jsonl_idle(
         if size != last_size:
             saw_change = True
             change_count += 1
-            log(f"     +{now - start:5.2f}s  변경 #{change_count}: {last_size:,}B → {size:,}B (Δ{size - last_size:+,})")
+            log(f"     +{now - start:5.2f}s  change #{change_count}: {last_size:,}B → {size:,}B (Δ{size - last_size:+,})")
             last_change = now
             last_size = size
         idle_for = now - last_change
         ready = idle_for >= idle_secs and (saw_change or not require_change)
         if ready:
             elapsed = now - start
-            log(f"  ✅ jsonl-idle 감지: elapsed={elapsed:.2f}s saw_change={saw_change} changes={change_count}")
+            log(f"  ✅ jsonl-idle detected: elapsed={elapsed:.2f}s saw_change={saw_change} changes={change_count}")
             return {
                 "elapsed": elapsed,
                 "saw_change": saw_change,
@@ -122,7 +122,7 @@ def wait_for_jsonl_idle(
 
     elapsed = time.monotonic() - start
     reason = "no_change" if (require_change and not saw_change) else "max_wait"
-    log(f"  ⚠ jsonl-idle 미달 (max_wait): elapsed={elapsed:.2f}s saw_change={saw_change} changes={change_count} reason={reason}")
+    log(f"  ⚠ jsonl-idle not reached (max_wait): elapsed={elapsed:.2f}s saw_change={saw_change} changes={change_count} reason={reason}")
     return {
         "elapsed": elapsed,
         "saw_change": saw_change,
@@ -145,29 +145,29 @@ def tty_curtain(
     post_idle_grace: float = 0.5,
     log_fn=None,
 ):
-    """alt screen 진입 → yield → (jsonl idle 대기) → ALT_OFF.
+    """Enter alternate screen → yield → wait for JSONL idle → ALT_OFF.
 
     Args:
-        claude_pid: claude TUI 의 PID.
-        enabled: False 면 no-op.
-        jsonl_path: 신호 polling target. None 이면 fallback_tail_wait sleep.
-        idle_secs: jsonl 이 이 시간 동안 변경 없으면 처리 완료.
-        max_wait: 전체 최대 대기 시간 (안전 상한).
-        fallback_tail_wait: jsonl_path 없을 때 fallback sleep.
-        post_idle_grace: idle 감지 후 추가 sleep — render 마무리 마진.
-        log_fn: 진단 로그 함수.
+        claude_pid: Claude TUI PID.
+        enabled: if False, this is a no-op.
+        jsonl_path: signal polling target; if None, fallback_tail_wait is used.
+        idle_secs: stable duration before treating JSONL processing as done.
+        max_wait: total wait ceiling.
+        fallback_tail_wait: fallback sleep when jsonl_path is unavailable.
+        post_idle_grace: extra sleep after idle to let rendering finish.
+        log_fn: diagnostic logger.
     """
     log = log_fn or (lambda _msg: None)
     tty = find_claude_tty(claude_pid) if enabled else None
     yield_start = time.monotonic()
     if tty:
         tty_write(tty, ALT_ON)
-        log(f"  🛡️ ALT_ON 인가 → {tty}")
+        log(f"  🛡️ ALT_ON applied → {tty}")
     try:
         yield tty
     finally:
         body_done = time.monotonic()
-        log(f"  🏁 본체 완료: 본체 소요 {body_done - yield_start:.2f}s")
+        log(f"  🏁 body complete: elapsed {body_done - yield_start:.2f}s")
         if tty:
             if jsonl_path:
                 wait_for_jsonl_idle(
@@ -181,7 +181,7 @@ def tty_curtain(
                     log(f"  💤 post-idle grace sleep {post_idle_grace}s")
                     time.sleep(post_idle_grace)
             elif fallback_tail_wait > 0:
-                log(f"  💤 fallback sleep {fallback_tail_wait}s (jsonl_path 없음)")
+                log(f"  💤 fallback sleep {fallback_tail_wait}s (jsonl_path missing)")
                 time.sleep(fallback_tail_wait)
             tty_write(tty, ALT_OFF)
-            log(f"  🛡️ ALT_OFF 인가 — 총 {time.monotonic() - yield_start:.2f}s")
+            log(f"  🛡️ ALT_OFF applied — total {time.monotonic() - yield_start:.2f}s")

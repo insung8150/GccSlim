@@ -1,34 +1,36 @@
-"""gccfork_archive.py — 자식 세션을 부모 아래로 archive (병합) 모듈.
+"""gccfork_archive.py — archive child sessions under a parent session.
 
-D안 채택: jsonl 을 archive 폴더로 이동 + registry 갱신 + sid lookup redirect.
-외부 .md 파일에 박힌 자식 sid 참조가 dead link 가 되지 않도록 jsonl 자체는 보존.
+Selected design D: move jsonl files into an archive folder, update the
+registry, and redirect sid lookup. The jsonl itself is preserved so child sid
+references embedded in external .md files do not become dead links.
 
-이 모듈은 사이드카 — 메인 `gccfork` 의 mono 비대화 정책에 따라 분리됨.
+This is a sidecar module, split out under the main `gccfork` mono
+non-interactive policy.
 
-## registry 새 필드 명세
+## New registry fields
 
-자식 세션 entry 에 다음 4 필드가 추가됨:
+Each child session entry receives these four fields:
 
 ```json
 {
   "sessions": {
-    "<자식_sid>": {
+    "<child_sid>": {
       "name": "...",
       "archived": true,
-      "archived_into": "<부모_sid>",
-      "archive_path": "/home/.../<P>/archive/<자식_sid>.jsonl",
+      "archived_into": "<parent_sid>",
+      "archive_path": "/home/.../<P>/archive/<child_sid>.jsonl",
       "archived_at": "2026-05-01T03:36:00.000Z"
     }
   }
 }
 ```
 
-`archived = false` 또는 키 없음 = 정상 (활성) 세션. `archived = true` = archive 됨.
-`archived_into` = 자식의 직계 부모 sid (재귀 archive 시 손자도 자기 직계 부모를 가리킴).
+`archived = false` or a missing key means a normal active session. `archived = true` means archived.
+`archived_into` stores the direct parent sid. In recursive archive, grandchildren point to their own direct parent.
 
-## 옵션 (prefs `archive.*`)
+## Options (prefs `archive.*`)
 
-10개 옵션 — `ARCHIVE_DEFAULTS` 참고.
+Ten options are listed in `ARCHIVE_DEFAULTS`.
 """
 
 from __future__ import annotations
@@ -53,19 +55,19 @@ from gccfork_sessions import (
 
 
 class ActiveSessionArchiveError(ValueError):
-    """활성 Claude 세션을 archive 하려 시도할 때 발생.
+    """Raised when trying to archive an active Claude session.
 
-    archive_session 의 이중 안전 가드 (merge 도 이걸 거치므로 §1 의 보강).
+    Double safety guard in archive_session; merge passes through this path too.
     """
     def __init__(self, sid: str):
         self.sid = sid
         super().__init__(
-            f"활성 Claude 세션 {sid[:8]} 은 archive 할 수 없음. "
-            f"먼저 /quit 으로 종료 후 다시 시도하세요."
+            f"Active Claude session {sid[:8]} cannot be archived. "
+            f"Run /quit first, then try again."
         )
 
-# Textual UI imports — 사이드카 내부 Screen + Mixin 용.
-# gccfork 가 PEP 723 venv 안에서 실행되므로 textual 항상 가능.
+# Textual UI imports for sidecar-local Screen and Mixin classes.
+# gccfork runs inside the PEP 723 venv, so textual is expected to be available.
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -73,9 +75,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
 
 
-# ── 옵션 기본값 ──────────────────────────────────────────────────────────
-# 10개 옵션 — prefs 키는 모두 `archive_` 접두사 (textual widget id 호환 위해 underscore).
-# `pref_get(key, default)` 로 조회.
+# ── option defaults ──────────────────────────────────────────────────────────
+# Ten options. Pref keys use the `archive_` prefix and underscores for Textual widget id compatibility.
+# Read them with `pref_get(key, default)`.
 ARCHIVE_DEFAULTS: dict[str, str | bool] = {
     "archive_preview_mode": "tail_sections",          # interleave / tail_sections / headers_only / split
     "archive_search_includes_children": True,
@@ -89,78 +91,73 @@ ARCHIVE_DEFAULTS: dict[str, str | bool] = {
     "archive_folder_layout": "per_project",           # per_project / central
 }
 
-# central 레이아웃에서 쓰일 archive 루트.
+# Archive root used by the central layout.
 CENTRAL_ARCHIVE_ROOT = Path.home() / ".claude" / "gccfork-archive"
 
 
 def get_archive_pref(key: str):
-    """archive.* prefs 조회 — 누락 시 ARCHIVE_DEFAULTS 폴백.
+    """Read archive.* prefs and fall back to ARCHIVE_DEFAULTS when missing.
 
-    `pref_get("archive_preview_mode")` 처럼 직접 부르지 말고 이 헬퍼 통해.
-    그래야 default 누락 케이스에서도 안전.
+    Use this helper instead of direct calls such as
+    `pref_get("archive_preview_mode")`, so missing defaults stay safe.
     """
     if key not in ARCHIVE_DEFAULTS:
-        # 미등록 키 — 호출자 버그 방지 위해 KeyError 대신 None 반환
+        # Unregistered key: return None instead of KeyError to avoid caller crashes.
         return pref_get(key, None)
     return pref_get(key, ARCHIVE_DEFAULTS[key])
 
 
-# ── archive 폴더 위치 ────────────────────────────────────────────────────
+# ── archive folder location ────────────────────────────────────────────────────
 def _archive_dir(jsonl_path: Path, layout: Optional[str] = None) -> Path:
-    """jsonl 파일이 옮겨질 archive 폴더 위치를 layout 옵션 기준으로 반환.
+    """Return the archive folder where a jsonl file should be moved, based on layout option.
 
-    - per_project (기본): jsonl 이 있는 프로젝트 폴더 안의 `archive/` 서브폴더
-      예: `~/.claude/projects/<P>/archive/`
-    - central: 통합 archive 루트 + 프로젝트별 서브폴더 (프로젝트명을 sanitize)
-      예: `~/.claude/gccfork-archive/<P>/`
+    - per_project (default): an `archive/` subfolder under the project folder containing the jsonl, e.g. `~/.claude/projects/<P>/archive/`
+    - central: one archive root with per-project subfolders using sanitized project names, e.g. `~/.claude/gccfork-archive/<P>/`
     """
     if layout is None:
         layout = str(get_archive_pref("archive_folder_layout"))
     project_dir = jsonl_path.parent
     if layout == "central":
-        # 프로젝트 폴더 이름 그대로 사용 (예: -home-yooha-...-MindVault)
+        # Use the project folder name as-is, for example -home-yooha-...-MindVault.
         return CENTRAL_ARCHIVE_ROOT / project_dir.name
     # default: per_project
     return project_dir / "archive"
 
 
-# ── archive 메타 ────────────────────────────────────────────────────────
+# ── archive metadata ────────────────────────────────────────────────────────
 @dataclass
 class ArchivedChildMeta:
-    """preview 렌더링이 사용하는 archive 자식 메타.
+    """Archived child metadata used by preview rendering.
 
-    `archived_children_for(parent_sid)` 가 반환. jsonl 자체는 lazy load —
-    `path` 만 넘기고 본문은 필요할 때 별도 함수로 읽음.
+    Returned by `archived_children_for(parent_sid)`. The jsonl body is lazy-loaded; only `path` is carried here and body text is read by separate helpers when needed.
     """
     sid: str
     short_id: str
-    path: Path                # archive 안의 jsonl 절대 경로
-    name: Optional[str]       # custom_name 또는 None
+    path: Path                # absolute jsonl path inside archive
+    name: Optional[str]       # custom_name or None
     auto_summary: Optional[str]
     archived_at: str          # iso8601
     parent_sid: str
     size_bytes: int = 0
-    turn_count: int = 0       # registry 에 저장돼있으면 사용, 없으면 -1
+    turn_count: int = 0       # from registry when available, otherwise -1
     fork_type: Optional[str] = None  # hard / slim / soft / auto
 
 
-# ── 후손 재귀 수집 ──────────────────────────────────────────────────────
+# ── recursive descendant collection ──────────────────────────────────────────────────────
 def collect_subtree(
     root_sids: Iterable[str],
     all_sessions: list[Session],
 ) -> list[Session]:
-    """root_sids 의 모든 후손(자식·손자·…) 을 dedup 해서 반환.
+    """Return all descendants of root_sids, deduplicated.
 
-    BFS — root_sids 는 결과에 **포함하지 않음**. 사용자가 "선택한 노드 자체는
-    리스트에 남기고 후손만 archive" 패턴이라.
+    BFS does not include root_sids in the result, matching the pattern where the selected node remains listed while only descendants are archived.
 
-    루트도 함께 archive 시키려면 호출자가 직접 결과에 추가하거나, root_sids 를
-    부모로 두고 자식부터 시작하면 됨.
+    Callers that need to archive roots too should add them explicitly or start from children with root_sids as parents.
 
-    Cycle 방어: 방문 set 으로 무한 루프 방지.
+    Cycle guard: visited set prevents infinite loops.
     """
     result: list[Session] = []
-    seen: set[str] = set(root_sids)  # root 자체는 결과 제외 + 재방문 방지
+    seen: set[str] = set(root_sids)  # exclude root from result and avoid revisits
 
     queue: list[str] = list(root_sids)
     while queue:
@@ -175,18 +172,15 @@ def collect_subtree(
     return result
 
 
-# ── jsonl 이동 + registry 갱신 (atomic) ──────────────────────────────────
+# ── jsonl move and registry update (atomic) ──────────────────────────────────
 def archive_session(session: Session, parent_sid: str) -> bool:
-    """session 의 jsonl 을 archive 폴더로 이동 + registry 4 필드 추가.
+    """Move session jsonl into the archive folder and add the four registry fields.
 
-    원자성: 이동 → registry 쓰기 순서. 이동은 OS rename 으로 atomic.
-    registry 쓰기 실패 시 jsonl 을 원위치로 되돌리는 롤백 시도.
+    Atomicity: move first, then write registry. The move is an OS rename when possible; registry write failure attempts to roll the jsonl back.
 
-    재호출 안전: 이미 archived 인 세션은 (no-op) True 반환.
+    Idempotent: already archived sessions return True as a no-op.
 
-    안전 가드 §2: 활성 Claude 세션은 archive 거부 (ActiveSessionArchiveError).
-    Claude 프로세스가 사라진 jsonl 에 계속 쓰려다 stub 을 만들어
-    registry 메타가 손상되는 사고 (2026-05-04) 예방. 단 이미 archived 면 통과.
+    Safety guard §2: reject active Claude sessions with ActiveSessionArchiveError. This prevents the 2026-05-04 failure where Claude kept writing to a moved jsonl, created a stub, and corrupted registry metadata. Already archived sessions pass.
     """
     src = session.jsonl_path
     if not src.exists():
@@ -194,10 +188,10 @@ def archive_session(session: Session, parent_sid: str) -> bool:
 
     reg_entry = registry_get(session.id)
     if reg_entry.get("archived"):
-        # 이미 archive 된 세션 — no-op
+        # Already archived session: no-op.
         return True
 
-    # 안전 가드 §2 — 활성 sid 차단 (이중 가드, merge §1 외에도 직접 archive 호출 차단)
+    # Safety guard §2: block active sid, covering direct archive calls in addition to merge guard §1.
     if session.id in all_active_sid_pid_map():
         raise ActiveSessionArchiveError(session.id)
 
@@ -205,18 +199,18 @@ def archive_session(session: Session, parent_sid: str) -> bool:
     archive_dir.mkdir(parents=True, exist_ok=True)
     dst = archive_dir / src.name
 
-    # 같은 이름이 이미 있으면 timestamp suffix
+    # Add a timestamp suffix when the same archive filename already exists.
     if dst.exists():
         ts = int(time.time())
         dst = archive_dir / f"{src.stem}.archived-{ts}{src.suffix}"
 
     try:
-        # OS rename — 같은 파일시스템이면 atomic. 다르면 shutil.move 가 copy+delete.
+        # OS rename is atomic on the same filesystem; otherwise shutil.move copies and deletes.
         shutil.move(str(src), str(dst))
     except OSError:
         return False
 
-    # registry 갱신. 실패 시 jsonl 원위치 롤백.
+    # Update registry. Roll jsonl back on failure.
     try:
         registry_set(
             session.id,
@@ -235,31 +229,28 @@ def archive_session(session: Session, parent_sid: str) -> bool:
     return True
 
 
-# ── 복원 (휴지통 패턴) ──────────────────────────────────────────────────
+# ── restore (trash pattern) ──────────────────────────────────────────────────
 def restore_session(sid: str) -> bool:
-    """archive 된 세션을 원위치로 복원 + registry 의 4 필드 제거.
+    """Restore an archived session to its original location and remove the four registry fields.
 
-    복원은 휴지통 패턴 (registry 에 archived=false 로 두지 않고 키 자체 제거).
-    `pref_get("archive_restore_enabled") == "permanent"` 면 호출자가 미리
-    거부해야 함 — 이 함수는 항상 작동.
+    Restore follows the trash pattern: remove keys instead of leaving archived=false in registry.
+    If `pref_get("archive_restore_enabled") == "permanent"`, callers must reject before calling; this function always works.
 
-    안전 가드 §3 fallback: registry entry 가 손상되어 archived 플래그가
-    없어도, archive 폴더 직접 스캔으로 sid 의 jsonl 을 찾아 복원 시도.
-    안전 가드 §4+5: dst 충돌 시 stub (lines<100) 이면 .stub.bak 으로 자동
-    백업 후 archive 본문 우선 복원. 일반 충돌만 .restored-<ts> 로 회피.
+    Safety guard §3 fallback: even if registry entry lost its archived flag, scan archive folders directly and try to find the sid jsonl.
+    Safety guards §4+5: if dst collides with a stub (lines < 100), back it up as .stub.bak and prefer the archive body. Only real collisions use .restored-<ts>.
     """
     entry = registry_get(sid)
     archive_path: Optional[Path] = None
     archived_flag = entry.get("archived")
 
     if archived_flag:
-        # 정상 경로 — registry 신뢰
+        # Normal path: trust registry.
         archive_path = Path(entry.get("archive_path", ""))
         if not archive_path.exists():
             archive_path = None
 
     if archive_path is None:
-        # 안전 가드 §3 — 폴더 스캔 fallback
+        # Safety guard §3: folder scan fallback.
         candidates: list[Path] = []
         for proj in PROJECTS_DIR.iterdir() if PROJECTS_DIR.exists() else []:
             p = proj / "archive" / f"{sid}.jsonl"
@@ -272,44 +263,43 @@ def restore_session(sid: str) -> bool:
                     if p.exists():
                         candidates.append(p)
         if candidates:
-            # 가장 큰 (= 진본일 확률 높음) 선택
+            # Choose the largest candidate, usually the real one.
             archive_path = max(candidates, key=lambda p: p.stat().st_size)
 
     if archive_path is None or not archive_path.exists():
         return False
 
-    # 원위치 = 같은 jsonl 파일명을 가진 프로젝트 폴더
-    # archive 폴더의 부모가 프로젝트 폴더 (per_project 일 때)
-    # central 일 때는 PROJECTS_DIR 안의 같은 이름 프로젝트 폴더
+    # Original location is the project folder with the same jsonl filename.
+    # For per_project, archive folder parent is the project folder.
+    # For central, use the same-named project folder under PROJECTS_DIR.
     layout = str(get_archive_pref("archive_folder_layout"))
     if layout == "central":
         project_dir = PROJECTS_DIR / archive_path.parent.name
     else:
-        project_dir = archive_path.parent.parent  # archive/ 의 부모
+        project_dir = archive_path.parent.parent  # parent of archive/
 
     project_dir.mkdir(parents=True, exist_ok=True)
     dst = project_dir / archive_path.name
 
     if dst.exists():
-        # 안전 가드 §4+5 — stub vs 실제 충돌 자동 분기
-        # archive 후 활성 Claude 가 만든 stub (수십 라인 미만) 이면 자동 백업 후
-        # archive 본문 우선 복원. 진짜 충돌 (큰 파일) 만 .restored 로 회피.
+        # Safety guards §4+5: automatically split stub versus real collision.
+        # If an active Claude process created a stub after archive, back it up and restore the archive body. Only real large-file collisions use .restored.
         try:
             line_count = sum(1 for _ in dst.open(encoding="utf-8", errors="ignore"))
         except OSError:
             line_count = 999_999
         if line_count < 100:
-            # stub 으로 판정 — 진단/식별 가치만 있으니 안전하게 백업
+            # Classified as stub: keep a safe backup for diagnosis/identification only.
             ts = int(time.time())
             stub_backup = project_dir / f"{archive_path.stem}.stub-{ts}{archive_path.suffix}"
             try:
                 shutil.move(str(dst), str(stub_backup))
             except OSError:
-                # 백업 실패 시 fallback — 충돌 회피로
+                # Backup failed; fall back to collision avoidance.
                 ts = int(time.time())
                 dst = project_dir / f"{archive_path.stem}.restored-{ts}{archive_path.suffix}"
         else:
-            # 진짜 콘텐츠 충돌 — 기존 동작 (archive 가 .restored 로)
+            # Real content collision: keep previous behavior by restoring archive as .restored.
             ts = int(time.time())
             dst = project_dir / f"{archive_path.stem}.restored-{ts}{archive_path.suffix}"
 
@@ -318,7 +308,7 @@ def restore_session(sid: str) -> bool:
     except OSError:
         return False
 
-    # registry 의 4 필드 제거 — None 전달 시 키 pop 됨 (registry_set 동작)
+    # Remove the four registry fields. Passing None pops keys in registry_set.
     try:
         registry_set(
             sid,
@@ -328,26 +318,22 @@ def restore_session(sid: str) -> bool:
             archived_at=None,
         )
     except Exception:
-        # registry 갱신 실패 시에도 파일은 이미 옮겨짐 — 그대로 둠
+        # Even if registry update fails, the file has already moved; leave it in place.
         pass
 
     return True
 
 
-# ── 분해 (병합 역연산 — 부모의 모든 자식 일괄 복원) ─────────────────────
+# ── unmerge: reverse archive by restoring all children under a parent ─────────────────────
 def unmerge_parent(parent_sid: str) -> tuple[int, int]:
-    """부모에 병합된 모든 archive 자식을 일괄 분해 (원위치 복원).
+    """Unmerge all archived children merged under a parent by restoring them in place.
 
-    병합 (archive_session) 의 정확한 역연산. 자식들의 jsonl 을 원래 project_dir
-    로 되돌리고 registry 의 4 archive 필드를 제거. 부모 entry 는 손대지 않음
-    — 부모 라벨의 📦N 마커는 archived_children_count() 의 dynamic sweep
-    결과라 자식이 사라지면 자동 0 → 마커 자동 소거.
+    Exact inverse of merge/archive_session. Child jsonl files move back to their original project_dir and the four archive registry fields are removed. The parent entry is untouched because the 📦N marker is computed dynamically by archived_children_count(), so it disappears when children are restored.
 
-    `pref_get("archive_restore_enabled") == "permanent"` 면 호출자가 미리
-    거부해야 함 — 이 함수 자체는 항상 작동.
+    If `pref_get("archive_restore_enabled") == "permanent"`, callers must reject before calling; this function always works.
 
     Returns:
-        (success, fail) — 시도한 자식 수 = success + fail
+        (success, fail), where attempted children = success + fail
     """
     children = archived_children_for(parent_sid)
     ok, fail = 0, 0
@@ -360,24 +346,21 @@ def unmerge_parent(parent_sid: str) -> tuple[int, int]:
 
 
 # ── stub jsonl sweeper ──────────────────────────────────────────────────
-# claude SessionStart hook / last-prompt 트래커가 archived 자식의 sid 로
-# main project_dir 에 metadata-only stub jsonl (~ <5KB, last-prompt /
-# custom-title / agent-name 만) 을 자동 생성해서 트리에 stale entry 가
-# 보이는 문제 해결용.
+# Fixes stale tree entries caused when Claude SessionStart hooks or last-prompt trackers create metadata-only stub jsonl files for archived child sids in the main project_dir.
 #
-# 안전 기준 (3개 모두 만족 시만 sweep):
-#   1. 파일 크기 < 5KB
-#   2. registry 의 그 sid 가 archived=true
-#   3. jsonl 안에 user/assistant role 메시지 0개
+# Safety criteria: sweep only when all three are true:
+#   1. file size < 5KB
+#   2. registry entry for sid has archived=true
+#   3. jsonl has zero user/assistant role messages
 #
-# 동작: archive/.stale-stubs/<ts>-<sid>.jsonl 로 이동 (삭제 X — 롤백 가능).
+# Action: move to archive/.stale-stubs/<ts>-<sid>.jsonl. Do not delete, so rollback remains possible.
 
 STUB_SWEEP_SIZE_LIMIT = 5 * 1024  # 5KB
 STUB_SWEEP_QUARANTINE = ".stale-stubs"
 
 
 def _is_stale_stub(jsonl_path: Path, sid: str) -> bool:
-    """3 가드 모두 통과하면 True (sweep 대상)."""
+    """Return True only when all three guards pass and the file should be swept."""
     try:
         size = jsonl_path.stat().st_size
     except OSError:
@@ -387,7 +370,7 @@ def _is_stale_stub(jsonl_path: Path, sid: str) -> bool:
     entry = registry_get(sid)
     if not entry.get("archived"):
         return False
-    # user/assistant 메시지 카운트
+    # count user/assistant messages
     try:
         text = jsonl_path.read_text(encoding="utf-8")
     except OSError:
@@ -402,15 +385,15 @@ def _is_stale_stub(jsonl_path: Path, sid: str) -> bool:
             continue
         msg = d.get("message") or {}
         if isinstance(msg, dict) and msg.get("role") in ("user", "assistant"):
-            return False  # 진짜 대화 메시지 발견 → stub 아님
+            return False  # real conversation message found, so this is not a stub
     return True
 
 
 def sweep_stale_stubs(project_dir: Path) -> list[str]:
-    """project_dir 의 모든 jsonl 을 검사해 stub 이면 quarantine 폴더로 이동.
+    """Scan every jsonl in project_dir and move stubs into the quarantine folder.
 
     Returns:
-        sweep 된 sid 목록 (8자 prefix). 빈 리스트면 sweep 0건.
+        List of swept sid prefixes (8 chars). Empty list means nothing was swept.
     """
     if not project_dir.exists():
         return []
@@ -419,7 +402,7 @@ def sweep_stale_stubs(project_dir: Path) -> list[str]:
     ts = int(time.time())
     for jsonl in project_dir.glob("*.jsonl"):
         sid = jsonl.stem
-        # 기본 sid 형태 검증 (UUID4 — 36자 + 4 dash) — 잘못된 파일명 보호
+        # Basic sid shape validation (36 chars + 4 dashes) protects unrelated filenames.
         if len(sid) != 36 or sid.count("-") != 4:
             continue
         if not _is_stale_stub(jsonl, sid):
@@ -435,10 +418,10 @@ def sweep_stale_stubs(project_dir: Path) -> list[str]:
 
 
 def sweep_all_known_projects() -> dict[str, list[str]]:
-    """PROJECTS_DIR 아래 모든 프로젝트 디렉토리에서 sweep_stale_stubs 일괄 실행.
+    """Run sweep_stale_stubs across all project directories under PROJECTS_DIR.
 
     Returns:
-        {project_name: [swept_sid_prefixes]} — sweep 된 것만 포함.
+        {project_name: [swept_sid_prefixes]}, including only projects with swept files.
     """
     out: dict[str, list[str]] = {}
     if not PROJECTS_DIR.exists():
@@ -452,12 +435,11 @@ def sweep_all_known_projects() -> dict[str, list[str]]:
     return out
 
 
-# ── sid → archive jsonl 경로 lookup ─────────────────────────────────────
+# ── sid -> archive jsonl path lookup ─────────────────────────────────────
 def find_archived_session(sid: str) -> Optional[Path]:
-    """sid 가 archive 된 세션이면 그 jsonl 경로 반환, 아니면 None.
+    """Return the archived jsonl path for sid if archived; otherwise None.
 
-    `gccfork_sessions.find_session_by_id` 가 일반 검색 실패 시 이 함수 호출
-    하도록 보강 (Phase 1 후반에 한 줄 패치).
+    `gccfork_sessions.find_session_by_id` calls this after normal search fails (one-line patch in late Phase 1).
     """
     entry = registry_get(sid)
     if not entry.get("archived"):
@@ -471,16 +453,13 @@ def find_archived_session(sid: str) -> Optional[Path]:
     return p
 
 
-# ── 부모의 archive 자식 목록 ─────────────────────────────────────────────
+# ── archived children for a parent ─────────────────────────────────────────────
 def archived_children_for(parent_sid: str) -> list[ArchivedChildMeta]:
-    """registry 에서 archived_into == parent_sid 인 자식들을 모두 반환.
+    """Return all children whose registry archived_into equals parent_sid.
 
-    preview 렌더링이 사용. jsonl 본문은 lazy load 라 여기서는 메타만.
-    sort 는 prefs `archive.child_sort_order` 기준.
+    Used by preview rendering. The jsonl body is lazy-loaded, so this returns metadata only. Sort order follows prefs `archive.child_sort_order`.
 
-    안전 가드 §3: registry 에 archived 플래그가 손상된 자식도 검출하도록
-    parent 의 merged_from 리스트 + archive 폴더 스캔 으로 fallback. 이중
-    검증으로 unmerge 시 자식 누락 방지 (2026-05-04 ca09 누락 사고 회고).
+    Safety guard §3: fallback to parent.merged_from plus archive folder scan so children with damaged archived flags are still detected. This double-check prevents missing children during unmerge, based on the 2026-05-04 ca09 incident.
     """
     reg = load_registry()
     sessions = reg.get("sessions", {}) or {}
@@ -493,7 +472,7 @@ def archived_children_for(parent_sid: str) -> list[ArchivedChildMeta]:
             continue
         archive_path = Path(entry.get("archive_path", ""))
         if not archive_path.exists():
-            # 파일 없어진 stale entry — 스킵 (UI 에서 정리 옵션 별도 추가 가능)
+            # Stale entry with missing file: skip it. A cleanup UI can be added separately.
             continue
         seen_sids.add(sid)
         try:
@@ -515,17 +494,15 @@ def archived_children_for(parent_sid: str) -> list[ArchivedChildMeta]:
             )
         )
 
-    # 안전 가드 §3 fallback — parent.merged_from 의 sid 들이 registry 손상으로
-    # archived 플래그를 잃었어도 archive 폴더에 jsonl 이 있으면 검출.
-    # 발견되면 archive_path 없는 ArchivedChildMeta 라도 만들어서 unmerge 가
-    # restore_session(sid) 호출 시 폴더 스캔으로 다시 찾도록 함.
+    # Safety guard §3 fallback: even if parent.merged_from sids lost archived flags due to registry damage, detect them when jsonl exists in archive folders.
+    # If found, create ArchivedChildMeta even without archive_path so unmerge can
+    # restore_session(sid) can find it again by folder scan.
     parent_entry = sessions.get(parent_sid) or {}
     merged_from = parent_entry.get("merged_from") or []
     if merged_from:
-        # archive 폴더 후보 — per_project 와 central 둘 다 시도
+        # archive folder candidates: try both per_project and central
         archive_dirs: list[Path] = []
-        # per_project: 부모의 jsonl 있을 만한 곳 (active_path 추정 어려우므로
-        # PROJECTS_DIR 의 모든 프로젝트 폴더의 archive/ 를 후보로)
+        # per_project: since active_path is hard to infer, try archive/ under every project folder in PROJECTS_DIR
         for proj in PROJECTS_DIR.iterdir() if PROJECTS_DIR.exists() else []:
             ad = proj / "archive"
             if ad.is_dir():
@@ -564,15 +541,15 @@ def archived_children_for(parent_sid: str) -> list[ArchivedChildMeta]:
                     seen_sids.add(sid)
                     break
 
-    # 정렬
+    # sort
     sort_order = str(get_archive_pref("archive_child_sort_order"))
     if sort_order == "alphabetic":
         out.sort(key=lambda m: (m.name or m.short_id).lower())
     elif sort_order == "branch_order":
-        # 분기 시점 = archived_at 오름차순
+        # branch order = archived_at ascending
         out.sort(key=lambda m: m.archived_at)
     else:
-        # mtime — 최근이 위
+        # mtime — newest first
         def _mtime(m: ArchivedChildMeta) -> float:
             try:
                 return m.path.stat().st_mtime
@@ -582,9 +559,9 @@ def archived_children_for(parent_sid: str) -> list[ArchivedChildMeta]:
     return out
 
 
-# ── 부모 노드의 archive 자식 카운트 (라벨용) ─────────────────────────────
+# ── archived child count for parent node labels ─────────────────────────────
 def archived_children_count(parent_sid: str) -> int:
-    """부모 노드 라벨 `📦 N archived` 표시용 — 빠른 카운트."""
+    """Fast count for parent node label `📦 N archived`."""
     reg = load_registry()
     sessions = reg.get("sessions", {}) or {}
     return sum(
@@ -594,11 +571,11 @@ def archived_children_count(parent_sid: str) -> int:
     )
 
 
-# ── archive 모드 자식 모두 (전체 archive 화면용) ────────────────────────
+# ── all archived children for full archive view ────────────────────────
 def all_archived_sessions() -> list[ArchivedChildMeta]:
-    """archive 화면 (=휴지통과 비슷) 에서 모든 archive 자식을 한 곳에 보여줄 때.
+    """For showing all archived children in one archive view, similar to trash.
 
-    parent_sid 별로 group 화 하는 건 호출자 책임.
+    Caller is responsible for grouping by parent_sid.
     """
     reg = load_registry()
     sessions = reg.get("sessions", {}) or {}
@@ -631,15 +608,15 @@ def all_archived_sessions() -> list[ArchivedChildMeta]:
     return out
 
 
-# ── Preview 통합 렌더 — 4 가지 모드 ──────────────────────────────────────
+# ── Integrated preview rendering — four modes ──────────────────────────────────────
 def _read_archive_jsonl_preview(
     path: Path,
     max_bytes: Optional[int] = None,
 ) -> str:
-    """archive 의 jsonl 을 읽어 사용자 보기 좋은 텍스트로 변환.
+    """Read an archived jsonl and convert it to user-readable text.
 
-    각 라인의 user/assistant 메시지를 추출 + 짧게 정리. 시스템/도구 메시지는 skip.
-    `max_bytes` 가 주어지면 그 만큼만 읽고 잘림 표시.
+    Extract user/assistant messages from each line and summarize them briefly. Skip system/tool messages.
+    When `max_bytes` is provided, read only that much and mark the preview as truncated.
     """
     import json as _json
     out_lines: list[str] = []
@@ -651,7 +628,7 @@ def _read_archive_jsonl_preview(
                 truncated = True
         text = data.decode("utf-8", errors="ignore")
     except OSError:
-        return "  (파일 읽기 실패)"
+        return "  (file read failed)"
 
     for line in text.splitlines():
         line = line.strip()
@@ -686,25 +663,25 @@ def _read_archive_jsonl_preview(
         body = body.strip()
         if not body:
             continue
-        # 시스템 inject 메시지는 skip — `<` 로 시작하는 태그성 내용
+        # Skip system-injected tag-like content starting with `<`.
         if body.startswith("<system-reminder>") or body.startswith("<command-name>"):
             continue
         prefix = "👤" if role == "user" else "🤖"
         out_lines.append(f"  {prefix} {body[:600]}")
-        out_lines.append("")  # 사이 한 줄
+        out_lines.append("")  # blank line between messages
     if truncated:
-        out_lines.append("  …(생략됨, lazy load 모드)")
-    return "\n".join(out_lines) if out_lines else "  (대화 내용 없음)"
+        out_lines.append("  …(truncated, lazy-load mode)")
+    return "\n".join(out_lines) if out_lines else "  (no conversation content)"
 
 
 def _format_child_header(
     meta: ArchivedChildMeta,
     fmt: Optional[str] = None,
 ) -> str:
-    """자식 섹션 헤더 — opt 8 (simple/verbose) 따라."""
+    """Child section header, controlled by option 8 (simple/verbose)."""
     if fmt is None:
         fmt = str(get_archive_pref("archive_section_header_format"))
-    name = meta.name or meta.auto_summary or "(이름 없음)"
+    name = meta.name or meta.auto_summary or "(unnamed)"
     name = name.replace("\n", " ")[:50]
 
     fork_emoji = ""
@@ -717,7 +694,7 @@ def _format_child_header(
 
     if fmt == "verbose":
         size_kb = max(1, meta.size_bytes // 1024)
-        turn = f"{meta.turn_count}턴" if meta.turn_count >= 0 else "?턴"
+        turn = f"{meta.turn_count} turns" if meta.turn_count >= 0 else "? turns"
         archived_at = meta.archived_at[:19] if meta.archived_at else "?"
         return f"▶ {fork_emoji}{meta.short_id}  {name}  ·  {turn}  ·  {size_kb}KB  ·  {archived_at}"
     # simple (default)
@@ -729,10 +706,10 @@ def _render_tail_sections(
     children: list[ArchivedChildMeta],
     width: int = 80,
 ) -> str:
-    """B안 (기본) — 자식 섹션을 끝에 붙임. 각 자식별 헤더 + 본문.
+    """Design B (default): append child sections at the end, with header and body for each child.
 
-    lazy_load (opt 6): ON 이면 자식별 처음 5KB 만 표시 + 잘림 표시.
-    OFF 면 전체.
+    lazy_load (option 6): when ON, show only the first 5KB per child and mark truncation.
+    When OFF, show all content.
     """
     lazy = bool(get_archive_pref("archive_lazy_load"))
     max_bytes = 5 * 1024 if lazy else None
@@ -758,11 +735,9 @@ def _read_archive_jsonl_messages(
     path: Path,
     max_bytes: Optional[int] = None,
 ) -> list[tuple[str, str, str]]:
-    """archive jsonl 을 (ts, role, body) 튜플 list 로 반환.
+    """Return archive jsonl messages as a list of (ts, role, body) tuples.
 
-    interleave 렌더에 사용. 실패/빈 메시지는 skip. ts 가 없는 라인도 포함
-    (빈 문자열 ts → 정렬 시 맨 앞으로). _read_archive_jsonl_preview 와 동일
-    필터 로직 (system/tool/메타 제외).
+    Used by interleave rendering. Skip failures and empty messages. Lines without ts are included with an empty ts, sorting first. Uses the same filters as _read_archive_jsonl_preview, excluding system/tool/meta.
     """
     import json as _json
     out: list[tuple[str, str, str]] = []
@@ -818,14 +793,11 @@ def _render_interleave(
     children: list[ArchivedChildMeta],
     width: int = 80,
 ) -> str:
-    """A안 — 시간순 인터리브.
+    """Design A: chronological interleave.
 
-    여러 자식 archive jsonl 의 메시지를 timestamp 기준으로 섞어 단일
-    timeline 으로 출력. (부모 본문은 preview 위쪽에 이미 표시되므로 자식들
-    사이의 chronological 통합만 담당.)
+    Mix messages from several child archive jsonl files by timestamp into one timeline. Parent content is already shown above the preview, so this only chronologically integrates children.
 
-    각 메시지에 자식 short_id + 색깔 점을 prefix 로 붙여 어느 자식 출처인지
-    구분 (opt 7 child_color_distinction).
+    Prefix each message with child short_id and a colored dot to identify the child source (option 7 child_color_distinction).
     """
     lazy = bool(get_archive_pref("archive_lazy_load"))
     color_dist = bool(get_archive_pref("archive_child_color_distinction"))
@@ -835,11 +807,11 @@ def _render_interleave(
     out: list[str] = []
     out.append("")
     out.append(sep)
-    out.append(f"📦 ARCHIVED CHILDREN ({len(children)}) — 시간순 인터리브")
+    out.append(f"📦 ARCHIVED CHILDREN ({len(children)}) — chronological interleave")
     out.append(sep)
     out.append("")
 
-    # (child_meta, ts, role, body) 튜플 모두 모아서 ts 정렬
+    # Collect all (child_meta, ts, role, body) tuples and sort by ts.
     flat: list[tuple[str, ArchivedChildMeta, str, str]] = []
     for meta in children:
         for ts, role, body in _read_archive_jsonl_messages(meta.path, max_bytes=max_bytes):
@@ -847,7 +819,7 @@ def _render_interleave(
     flat.sort(key=lambda x: x[0])
 
     if not flat:
-        out.append("  (자식들에 표시할 메시지 없음)")
+        out.append("  (no child messages to display)")
         return "\n".join(out)
 
     last_meta_id = ""
@@ -863,7 +835,7 @@ def _render_interleave(
         out.append("")
 
     if lazy and max_bytes is not None:
-        out.append(f"  …(각 자식 첫 {max_bytes // 1024}KB 까지만, lazy load)")
+        out.append(f"  …(first {max_bytes // 1024}KB per child only, lazy load)")
     return "\n".join(out)
 
 
@@ -872,17 +844,15 @@ def _render_headers_only(
     children: list[ArchivedChildMeta],
     width: int = 80,
 ) -> str:
-    """C안 — 헤더 + 짧은 미리보기 (첫 user/assistant 1쌍).
+    """Design C: headers plus a short preview (first user/assistant pair).
 
-    완전한 collapsible 은 TextArea 로 불가 → 대신 각 자식의 첫 user 메시지
-    + 첫 assistant 메시지 (각 200자) 를 'snippet' 으로 보여줘 사용자가 어떤
-    대화였는지 즉시 파악 가능. tail_sections 보다 훨씬 짧음.
+    A true collapsible view is not possible with TextArea, so show the first user message and first assistant message (200 chars each) as snippets. This is much shorter than tail_sections.
     """
     sep = "━" * min(width, 78)
     out: list[str] = []
     out.append("")
     out.append(sep)
-    out.append(f"📦 ARCHIVED CHILDREN ({len(children)}) — 헤더 + 미리보기")
+    out.append(f"📦 ARCHIVED CHILDREN ({len(children)}) — headers + preview")
     out.append(sep)
     out.append("")
     for meta in children:
@@ -891,7 +861,7 @@ def _render_headers_only(
             summary = meta.auto_summary.replace("\n", " ")[:120]
             out.append(f"   ↳ {summary}")
 
-        # 짧은 snippet — 첫 user + 첫 assistant 메시지
+        # Short snippet: first user plus first assistant message.
         msgs = _read_archive_jsonl_messages(meta.path, max_bytes=10 * 1024)
         first_user = next(((ts, b) for ts, r, b in msgs if r == "user"), None)
         first_asst = next(((ts, b) for ts, r, b in msgs if r == "assistant"), None)
@@ -902,7 +872,7 @@ def _render_headers_only(
             body = first_asst[1].replace("\n", " ")[:200]
             out.append(f"   🤖 {body}")
         out.append("")
-    out.append("  (전체 본문은 설정 → preview_mode 를 tail_sections / interleave 로 변경)")
+    out.append("  (Change Settings -> preview_mode to tail_sections or interleave for full content.)")
     return "\n".join(out)
 
 
@@ -911,11 +881,9 @@ def _render_split(
     children: list[ArchivedChildMeta],
     width: int = 80,
 ) -> str:
-    """D안 — 카드형 (자식별 강한 시각 구분).
+    """Design D: card layout with strong visual separation by child.
 
-    진짜 위젯 split 은 메인 TUI 큰 변경이라 보류. 대신 각 자식을 box-drawing
-    문자로 둘러싼 'card' 형태로 표시 → 시각적으로 또렷이 분리. tail_sections
-    의 ━ 단순 구분선보다 훨씬 강한 분리감.
+    A true widget split would require a large main TUI change, so each child is shown as a box-drawing card. This separates children more clearly than the simple tail_sections divider.
     """
     lazy = bool(get_archive_pref("archive_lazy_load"))
     max_bytes = 5 * 1024 if lazy else None
@@ -923,7 +891,7 @@ def _render_split(
 
     out: list[str] = []
     out.append("")
-    out.append(f"📦 ARCHIVED CHILDREN ({len(children)}) — 카드 split")
+    out.append(f"📦 ARCHIVED CHILDREN ({len(children)}) — card split")
     out.append("")
 
     for idx, meta in enumerate(children, 1):
@@ -938,8 +906,8 @@ def _render_split(
 
         body = _read_archive_jsonl_preview(meta.path, max_bytes=max_bytes)
         for line in body.splitlines():
-            # box 안에 padding — 폭 초과 시 잘라서 다음 줄로 넘기지 않고 그대로 둠
-            # (TextArea 가 wrap 처리하므로 OK)
+            # Padding inside the box; over-wide content is clipped instead of manually wrapped.
+            # (TextArea handles wrapping, so this is OK.)
             content = line.rstrip()
             out.append("│" + content.ljust(inner_w)[:inner_w] + "│")
 
@@ -953,10 +921,10 @@ def build_archived_children_section(
     parent: Session,
     width: int = 80,
 ) -> str:
-    """preview 끝에 붙일 archive 자식 섹션 텍스트 빌드 — dispatcher.
+    """Build archived child section text appended to the end of preview; dispatcher.
 
-    `archive_preview_mode` (opt 1) 에 따라 4가지 함수 중 하나 호출.
-    archive 자식 0개면 빈 문자열 반환 (=> 영향 없음).
+    Call one of four renderers according to `archive_preview_mode` (option 1).
+    Return an empty string when there are no archived children, causing no preview impact.
     """
     try:
         children = archived_children_for(parent.id)
@@ -976,24 +944,23 @@ def build_archived_children_section(
     return _render_tail_sections(parent, children, width)
 
 
-# ── ArchiveConfirmScreen — 사용자 확인 모달 ─────────────────────────────
-# textual 없으면 이 클래스 정의 자체가 실패하므로 모듈 import 도 실패 — 의도된 동작
-# (메인 gccfork 는 textual 이 있는 PEP 723 venv 안에서 실행되므로 항상 OK).
-# 단위 테스트는 textual venv 에서 돌리거나, 데이터 함수만 별도 import 하는
-# 미니 스크립트로.
+# ── ArchiveConfirmScreen — user confirmation modal ─────────────────────────────
+# If textual is unavailable, defining this class fails and importing the module also fails; this is intentional.
+# The main gccfork runs in a PEP 723 venv with textual, so this is normally OK.
+# Unit tests should run in the textual venv or import only data helpers from small scripts.
 class ArchiveConfirmScreen(ModalScreen[bool]):
-    """archive 이동 confirm 모달 — ForkNameScreen 톤.
+    """Archive move confirmation modal, styled similarly to ForkNameScreen.
 
-    표시 내용:
-      - 직접 선택한 세션 N개 + 함께 끌려가는 자손 M개
-      - 자손 sid + 이름 미리보기 (앞 6개)
-      - ★ 중요 표시 포함 시 별도 경고 라인 (opt 3 가 confirm 일 때)
+    Display contents:
+      - N directly selected sessions plus M descendants pulled with them.
+      - descendant sid and name preview (first six)
+      - separate warning line when starred important sessions are included (option 3 confirm)
 
-    Esc 는 BINDINGS 로 처리 — App 의 quit 까지 propagate 안 됨.
+    Esc is handled by BINDINGS and does not propagate to App quit.
     """
 
     BINDINGS = [
-        Binding("escape", "cancel_screen", "취소", show=False),
+        Binding("escape", "cancel_screen", "Cancel", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -1112,80 +1079,80 @@ class ArchiveConfirmScreen(ModalScreen[bool]):
         with Vertical(id="arc-box"):
             with Horizontal(id="arc-header"):
                 yield Static("[b]GccForK[/]", id="arc-brand", markup=True)
-                yield Static("[b]🗂 Archive 병합[/]", id="arc-title", markup=True)
+                yield Static("[b]🗂 Archive merge[/]", id="arc-title", markup=True)
                 yield Static(
                     f"[dim]v{self.gccfork_version}[/]",
                     id="arc-meta", markup=True,
                 )
 
             with Vertical(id="arc-scroll"):
-                # 요약 섹션
+                # Summary section
                 with Vertical(classes="arc-section"):
                     yield Static(
-                        "[b][INFO][/] 요약",
+                        "[b][INFO][/] Summary",
                         classes="arc-section-title", markup=True,
                     )
                     yield Static(
-                        f"직접 선택: [b]{len(self.directly_selected)}개[/b]  ·  "
-                        f"끌려가는 자손: [b]{len(self.descendants)}개[/b]  ·  "
-                        f"총 [b]{self.total}개[/b]",
+                        f"Selected: [b]{len(self.directly_selected)}[/b]  ·  "
+                        f"Descendants pulled: [b]{len(self.descendants)}[/b]  ·  "
+                        f"Total [b]{self.total}[/b]",
                         markup=True,
                     )
                     if self.important_count > 0:
                         yield Static(
-                            f"[red]★[/red] 중요 표시 포함: [b]{self.important_count}개[/b]",
+                            f"[red]★[/red] Includes important sessions: [b]{self.important_count}[/b]",
                             markup=True,
                         )
 
-                # 직접 선택 섹션
+                # direct selection section
                 with Vertical(classes="arc-section"):
                     yield Static(
-                        "[b][SELECTED][/] 직접 선택한 세션",
+                        "[b][SELECTED][/] Directly selected sessions",
                         classes="arc-section-title", markup=True,
                     )
                     for s in self.directly_selected[:6]:
-                        title = (s.title or "(이름 없음)")[:50].replace("\n", " ")
+                        title = (s.title or "(unnamed)")[:50].replace("\n", " ")
                         star = "★ " if s.important else ""
                         yield Static(f"  {star}{s.short_id}  {title}")
                     if len(self.directly_selected) > 6:
-                        yield Static(f"  …외 {len(self.directly_selected) - 6}개 더")
+                        yield Static(f"  …and {len(self.directly_selected) - 6} more")
 
-                # 자손 섹션 (있을 때만)
+                # descendant section, only when present
                 if self.descendants:
                     with Vertical(classes="arc-section"):
                         yield Static(
-                            "[b][DESCENDANTS][/] 함께 끌려가는 자손",
+                            "[b][DESCENDANTS][/] Descendants pulled with selection",
                             classes="arc-section-title", markup=True,
                         )
                         for s in self.descendants[:6]:
-                            title = (s.title or "(이름 없음)")[:50].replace("\n", " ")
+                            title = (s.title or "(unnamed)")[:50].replace("\n", " ")
                             star = "★ " if s.important else ""
                             yield Static(f"  ↳ {star}{s.short_id}  {title}")
                         if len(self.descendants) > 6:
-                            yield Static(f"  …외 {len(self.descendants) - 6}개 더")
+                            yield Static(f"  …and {len(self.descendants) - 6} more")
 
-                # 동작 설명
+                # behavior description
                 with Vertical(classes="arc-section"):
                     yield Static(
-                        "[b][WHAT HAPPENS][/] 동작",
+                        "[b][WHAT HAPPENS][/] What happens",
                         classes="arc-section-title", markup=True,
                     )
-                    yield Static("  • jsonl 파일은 archive/ 폴더로 이동 (보존)")
-                    yield Static("  • registry 에 archived 표시 → 트리에서 부모 아래로 통합")
-                    yield Static("  • sid 직접 호출 시 archive 자동 lookup (외부 .md 참조 안 깨짐)")
-                    yield Static("  • 복원 가능 (설정에서 휴지통 패턴 활성화 시)")
+                    yield Static("  • jsonl files move into archive/ and are preserved")
+                    yield Static("  • registry marks them archived, so they appear under the parent in the tree")
+                    yield Static("  • direct sid lookup searches archive automatically, so external .md references stay valid")
+                    yield Static("  • restore is possible when trash-pattern restore is enabled in settings")
 
             with Horizontal(id="arc-btn-row"):
-                yield Button("Esc 취소", id="btn-arc-cancel")
+                yield Button("Esc Cancel", id="btn-arc-cancel")
                 yield Static("", id="arc-btn-spacer")
                 yield Button(
-                    f"Archive ({self.total}개)",
+                    f"Archive ({self.total})",
                     id="btn-arc-confirm", variant="primary",
                 )
-        # CopyMenuOverlay 는 메인의 클래스라 사이드카에서 못 import — 여기선 생략.
+        # CopyMenuOverlay is a main-module class and cannot be imported from this sidecar, so it is omitted here.
 
     def on_mount(self) -> None:
-        # 첫 포커스: 취소 — 무심코 Enter 쳐도 destructive 액션 발동 안 함
+        # Initial focus is Cancel so an accidental Enter does not trigger a destructive action.
         self.query_one("#btn-arc-cancel", Button).focus()
 
     def action_cancel_screen(self) -> None:
@@ -1199,15 +1166,15 @@ class ArchiveConfirmScreen(ModalScreen[bool]):
             self.dismiss(False)
 
 
-# ── UnmergeConfirmScreen (분해 확인 모달) ──────────────────────────────
+# ── UnmergeConfirmScreen (unmerge confirmation modal) ──────────────────────────────
 class UnmergeConfirmScreen(ModalScreen[bool]):
-    """분해 (unmerge) confirm 모달 — ArchiveConfirmScreen 의 짝.
+    """Unmerge confirmation modal, paired with ArchiveConfirmScreen.
 
-    부모 1개 + 그 부모에 병합된 자식 N개 표시 → 확인 시 일괄 분해.
+    Shows one parent and N children merged under it, then unmerges them in bulk on confirm.
     """
 
     BINDINGS = [
-        Binding("escape", "cancel_screen", "취소", show=False),
+        Binding("escape", "cancel_screen", "Cancel", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -1257,7 +1224,7 @@ class UnmergeConfirmScreen(ModalScreen[bool]):
         padding: 1 1 0 1;
         background: transparent;
     }
-    /* 본문 SelectableTextArea — drag-select + 우클릭 복사 가능 */
+    /* Body SelectableTextArea supports drag-select and right-click copy. */
     #unm-body {
         height: auto;
         max-height: 24;
@@ -1313,45 +1280,45 @@ class UnmergeConfirmScreen(ModalScreen[bool]):
     ) -> None:
         super().__init__()
         self.parent_session = parent_session
-        # NOTE: `self.children` 은 textual Screen 의 built-in 속성 — shadow 불가.
-        # 그래서 `archived_children` 으로 분리.
+        # NOTE: `self.children` is a built-in textual Screen attribute and cannot be shadowed.
+        # Use `archived_children` instead.
         self.archived_children = archived_children
         self.gccfork_version = gccfork_version
         self.total = len(archived_children)
 
     def compose(self) -> ComposeResult:
-        # 본문 내용을 SelectableTextArea (drag-select + 우클릭 복사) 로 일체화.
-        # SelectableTextArea 는 main 모듈에 있어 lazy import — circular import 방지.
+        # Use one SelectableTextArea for the body so drag-select and right-click copy work consistently.
+        # SelectableTextArea lives in the main module, so lazy import avoids circular imports.
         try:
             from gccfork import SelectableTextArea
         except Exception:
             SelectableTextArea = None  # type: ignore
 
-        # 본문 plain text 빌드 — markup 없이 (TextArea 는 raw text)
+        # Build plain body text without markup because TextArea uses raw text.
         p = self.parent_session
-        p_title = (p.title or "(이름 없음)")[:60].replace("\n", " ")
+        p_title = (p.title or "(unnamed)")[:60].replace("\n", " ")
         lines: list[str] = []
-        lines.append("[PARENT] 분해 대상 부모")
+        lines.append("[PARENT] Parent to unmerge")
         lines.append(f"  📦{self.total}  {p.short_id}  {p_title}")
         lines.append("")
-        lines.append(f"[CHILDREN] 원위치로 복귀할 자식 — {self.total}개")
+        lines.append(f"[CHILDREN] Children to restore in place — {self.total}")
         for c in self.archived_children[:8]:
-            name = (c.name or "(이름 없음)")[:50].replace("\n", " ")
+            name = (c.name or "(unnamed)")[:50].replace("\n", " ")
             lines.append(f"  ↩ {c.short_id}  {name}")
         if len(self.archived_children) > 8:
-            lines.append(f"  …외 {len(self.archived_children) - 8}개 더")
+            lines.append(f"  …and {len(self.archived_children) - 8} more")
         lines.append("")
-        lines.append("[WHAT HAPPENS] 동작")
-        lines.append("  • 자식 jsonl 들이 archive/ → 원래 project_dir 로 이동 (역연산)")
-        lines.append("  • registry 의 archive 4 필드 (archived/archived_into/archive_path/archived_at) 제거")
-        lines.append("  • 부모의 📦 마커 자동 소거 (자식 카운트 0)")
-        lines.append("  • 자손이 더 깊이 archive 된 경우 그 단계는 보존 (한 단계만 분해)")
+        lines.append("[WHAT HAPPENS] What happens")
+        lines.append("  • child jsonl files move from archive/ back to original project_dir (inverse operation)")
+        lines.append("  • remove the four archive registry fields (archived/archived_into/archive_path/archived_at)")
+        lines.append("  • parent 📦 marker disappears automatically when child count becomes 0")
+        lines.append("  • deeper archived descendants remain archived; only one level is unmerged")
         body_text = "\n".join(lines)
 
         with Vertical(id="unm-box"):
             with Horizontal(id="unm-header"):
                 yield Static("[b]GccForK[/]", id="unm-brand", markup=True)
-                yield Static("[b]🔧 분해 (병합 해제)[/]", id="unm-title", markup=True)
+                yield Static("[b]🔧 Unmerge[/]", id="unm-title", markup=True)
                 yield Static(
                     f"[dim]v{self.gccfork_version}[/]",
                     id="unm-meta", markup=True,
@@ -1370,19 +1337,19 @@ class UnmergeConfirmScreen(ModalScreen[bool]):
                         highlight_cursor_line=False,
                     )
                 else:
-                    # fallback: SelectableTextArea import 실패 시 Static 으로 (선택 불가)
+                    # fallback: use Static when SelectableTextArea import fails (not selectable)
                     yield Static(body_text, id="unm-body")
 
             with Horizontal(id="unm-btn-row"):
-                yield Button("Esc 취소", id="btn-unm-cancel")
+                yield Button("Esc Cancel", id="btn-unm-cancel")
                 yield Static("", id="unm-btn-spacer")
                 yield Button(
-                    f"분해 ({self.total}개)",
+                    f"Unmerge ({self.total})",
                     id="btn-unm-confirm", variant="primary",
                 )
 
     def on_mount(self) -> None:
-        # 첫 포커스: 취소 — 무심코 Enter 쳐도 destructive 액션 발동 안 함
+        # Initial focus is Cancel so an accidental Enter does not trigger a destructive action.
         self.query_one("#btn-unm-cancel", Button).focus()
 
     def action_cancel_screen(self) -> None:
@@ -1396,11 +1363,11 @@ class UnmergeConfirmScreen(ModalScreen[bool]):
             self.dismiss(False)
 
 
-# ── ArchiveMixin — App 에 결합되는 액션 메서드 ──────────────────────────
+# ── ArchiveMixin — action methods mixed into the App ──────────────────────────
 class ArchiveMixin:
-    """App 클래스에 mixin 으로 결합되어 archive 액션을 제공.
+    """Mixin attached to the App class to provide archive actions.
 
-    필요 메서드 (App 측):
+    Required methods/attributes on the App side:
       - self.sessions (list[Session])
       - self._multi_selected_ids (set[str])
       - self.notify(msg, severity=...)
@@ -1408,26 +1375,26 @@ class ArchiveMixin:
       - self.reload_sessions()
       - self._update_multi_action_visibility()
       - self.refresh_list()
-      - GCCFORK_VERSION 글로벌 (없으면 "")
+      - GCCFORK_VERSION global, or empty string if missing
     """
 
     def action_archive_selected(self) -> None:
-        """멀티 선택된 세션 + 자손을 archive 폴더로 이동.
+        """Move multi-selected sessions and descendants into archive folders.
 
-        흐름:
-        1. 멀티 선택 sid 모음 → Session 객체 변환
-        2. 후손 재귀 수집 (`collect_subtree`)
-        3. ★ 중요 처리 분기 (opt 3):
-             - auto_include: 그냥 진행
-             - confirm: 별도 모달 없이 ArchiveConfirmScreen 안에서 경고만 표시
-             - reject: 중요 포함 시 거부 + notify
-        4. ArchiveConfirmScreen 띄움
-        5. confirm 시 모두 archive_session 호출
+        Flow:
+        1. convert selected sids to Session objects
+        2. recursive descendant collection (`collect_subtree`)
+        3. starred-important handling branch (opt 3):
+             - auto_include: proceed directly
+             - confirm: only show a warning inside ArchiveConfirmScreen, without a separate modal
+             - reject: reject and notify when important sessions are included
+        4. ArchiveConfirmScreen show
+        5. on confirm, call archive_session for all
         """
         sel_ids: set[str] = set(getattr(self, "_multi_selected_ids", set()))
         if not sel_ids:
             try:
-                self.notify("선택된 세션이 없습니다.", severity="warning")
+                self.notify("No sessions selected.", severity="warning")
             except Exception:
                 pass
             return
@@ -1438,18 +1405,18 @@ class ArchiveMixin:
             return
 
         descendants = collect_subtree([s.id for s in directly_selected], all_sessions)
-        # 직접 선택과 후손은 서로 disjoint — collect_subtree 가 root_sids 제외하고 반환
+        # Direct selections and descendants are disjoint because collect_subtree excludes root_sids.
 
         all_targets = directly_selected + descendants
         important_count = sum(1 for s in all_targets if s.important)
 
-        # opt 3: ★ 중요 처리
+        # option 3: starred-important handling
         important_handling = str(get_archive_pref("archive_important_handling"))
         if important_count > 0 and important_handling == "reject":
             try:
                 self.notify(
-                    f"★ 중요 표시된 세션 {important_count}개가 포함됨 — 설정상 거부됨. "
-                    "★ 떼고 다시 시도하세요.",
+                    f"{important_count} starred important session(s) included; settings reject archiving them. "
+                    "Remove the star and try again.",
                     severity="error",
                 )
             except Exception:
@@ -1481,7 +1448,7 @@ class ArchiveMixin:
             )
         except Exception as exc:
             try:
-                self.notify(f"archive 모달 띄우기 실패: {exc}", severity="error")
+                self.notify(f"failed to open archive modal: {exc}", severity="error")
             except Exception:
                 pass
 
@@ -1490,16 +1457,16 @@ class ArchiveMixin:
         directly_selected: list[Session],
         descendants: list[Session],
     ) -> None:
-        """ArchiveConfirmScreen 통과 후 실제 이동.
+        """Move files after ArchiveConfirmScreen confirmation.
 
-        부모 sid 결정 규칙:
-          - 직접 선택한 세션 → 그 세션의 parent_id (없으면 빈 문자열)
-          - 자손 → 직속 부모의 sid (재귀 archive 시에도 부모-자식 관계 유지)
+        Parent sid rules:
+          - Directly selected sessions → that session parent_id, or empty string when absent
+          - descendants -> direct parent sid, preserving parent/child links during recursive archive
         """
         moved = 0
         failed = 0
 
-        # 자손은 자기 직속 부모를 archived_into 로 가져야 트리 구조 보존
+        # Descendants must keep their direct parent as archived_into to preserve tree structure.
         for sess in descendants:
             parent_sid = sess.parent_id or ""
             if archive_session(sess, parent_sid):
@@ -1507,7 +1474,7 @@ class ArchiveMixin:
             else:
                 failed += 1
 
-        # 직접 선택은 자기 부모 (없으면 root, 빈 문자열) 로
+        # Selected sessions use their own parent, or root/empty string when absent.
         for sess in directly_selected:
             parent_sid = sess.parent_id or ""
             if archive_session(sess, parent_sid):
@@ -1518,15 +1485,15 @@ class ArchiveMixin:
         try:
             if failed:
                 self.notify(
-                    f"Archive: {moved}개 이동, {failed}개 실패",
+                    f"Archive: moved {moved}, failed {failed}",
                     severity="warning",
                 )
             else:
-                self.notify(f"🗂 Archive: {moved}개 이동 완료")
+                self.notify(f"🗂 Archive: moved {moved}")
         except Exception:
             pass
 
-        # 멀티 선택 클리어 + 리로드
+        # clear multi-selection and reload
         try:
             self._multi_selected_ids.clear()
         except Exception:
@@ -1541,21 +1508,21 @@ class ArchiveMixin:
             pass
 
     def action_unmerge_selected(self) -> None:
-        """단일 선택된 부모 세션의 모든 archive 자식을 일괄 분해 (병합 역연산).
+        """Unmerge all archived children of one selected parent session, the inverse of merge.
 
-        활성 조건 (호출자가 가드):
-          - 멀티 선택 1개
-          - 그 세션에 archived_children > 0 (📦 마커)
+        Active conditions, guarded by caller:
+          - exactly one multi-selected session
+          - that session has archived_children > 0 (📦 marker)
 
-        흐름:
-        1. 선택 세션 → archived_children_for(sid) 로 자식 목록 조회
-        2. permanent 모드 가드 (전체 거부)
-        3. UnmergeConfirmScreen 띄움
-        4. confirm 시 unmerge_parent() 호출 → 결과 notify + reload
+        Flow:
+        1. selected session -> query children with archived_children_for(sid)
+        2. permanent mode guard, reject entirely
+        3. UnmergeConfirmScreen show
+        4. on confirm, call unmerge_parent(), notify result, and reload
         """
         if str(get_archive_pref("archive_restore_enabled")) == "permanent":
             try:
-                self.notify("분해 비활성화 (설정상 영구 archive 모드)", severity="warning")
+                self.notify("Unmerge is disabled by permanent archive mode setting.", severity="warning")
             except Exception:
                 pass
             return
@@ -1563,7 +1530,7 @@ class ArchiveMixin:
         sel_ids: set[str] = set(getattr(self, "_multi_selected_ids", set()))
         if len(sel_ids) != 1:
             try:
-                self.notify("분해는 부모 1개 단일 선택일 때만 가능합니다.", severity="warning")
+                self.notify("Unmerge requires selecting exactly one parent.", severity="warning")
             except Exception:
                 pass
             return
@@ -1577,7 +1544,7 @@ class ArchiveMixin:
         children = archived_children_for(target_sid)
         if not children:
             try:
-                self.notify("선택한 세션에 병합된 자식이 없습니다 (📦 0).", severity="warning")
+                self.notify("Selected session has no merged children (📦 0).", severity="warning")
             except Exception:
                 pass
             return
@@ -1596,16 +1563,16 @@ class ArchiveMixin:
             success, fail = unmerge_parent(target_sid)
             try:
                 if fail == 0:
-                    self.notify(f"🔧 분해 완료: {success}개 자식이 원위치로 복귀")
+                    self.notify(f"🔧 Unmerge complete: restored {success} child session(s)")
                 else:
                     self.notify(
-                        f"🔧 분해 부분 실패: 성공 {success} / 실패 {fail}",
+                        f"🔧 Unmerge partially failed: success {success} / fail {fail}",
                         severity="warning",
                     )
             except Exception:
                 pass
             try:
-                # 분해 후 multi 선택 해제 (선택했던 부모는 이제 평범한 세션)
+                # clear multi-selection after unmerge; the selected parent is now a normal session
                 self._multi_selected_ids.clear()
             except Exception:
                 pass
@@ -1629,24 +1596,24 @@ class ArchiveMixin:
             )
         except Exception as exc:
             try:
-                self.notify(f"분해 모달 띄우기 실패: {exc}", severity="error")
+                self.notify(f"failed to open unmerge modal: {exc}", severity="error")
             except Exception:
                 pass
 
     def action_restore_archived(self, sid: str) -> None:
-        """archive 화면에서 복원 액션 호출용. opt 4 가 permanent 면 거부.
+        """Called by restore action in archive view. Reject when option 4 is permanent.
 
-        UI 측에서 호출 — Phase 4 의 archive view 모달이 사용.
+        Called by UI; used by the Phase 4 archive-view modal.
         """
         if str(get_archive_pref("archive_restore_enabled")) == "permanent":
             try:
-                self.notify("복원 비활성화 (설정상 영구 archive 모드)", severity="warning")
+                self.notify("Restore is disabled by permanent archive mode setting.", severity="warning")
             except Exception:
                 pass
             return
         if restore_session(sid):
             try:
-                self.notify(f"복원됨: {sid[:8]}")
+                self.notify(f"Restored: {sid[:8]}")
             except Exception:
                 pass
             try:
@@ -1655,12 +1622,12 @@ class ArchiveMixin:
                 pass
         else:
             try:
-                self.notify(f"복원 실패: {sid[:8]}", severity="error")
+                self.notify(f"Restore failed: {sid[:8]}", severity="error")
             except Exception:
                 pass
 
 
-# ── 모듈 export ─────────────────────────────────────────────────────────
+# ── module exports ─────────────────────────────────────────────────────────
 __all__ = [
     "ARCHIVE_DEFAULTS",
     "CENTRAL_ARCHIVE_ROOT",

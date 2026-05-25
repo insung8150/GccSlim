@@ -1,17 +1,18 @@
-"""gccfork 데이터 계층 — jsonl 파싱 / 세션 인덱스 / registry / 부모 추론.
+"""gccfork data layer: JSONL parsing, session indexing, registry, ancestry.
 
-메인 `gccfork` 와 사이드카 (cli, autoreload, search) 가 공유하는 코드.
+Shared by the main `gccfork` app and sidecars such as cli, autoreload, and
+search.
 
-핵심 최적화:
-  - `parse_session` 결과는 (size, mtime) 키로 `_PARSE_CACHE` 에 캐시
-    → 변경되지 않은 jsonl 은 stat 한 번 + dict lookup 으로 끝
-  - `_PARSE_CACHE` 는 `~/.claude/gccfork-parse-cache.pickle` 에 영속화
-    → process 가 새로 시작해도 이전 파싱 결과 재사용
-    → mtime/size 검증으로 stale entry 자동 무효화
-  - `load_registry` / `load_legacy_registry` 도 (mtime, data) 캐시
-    → scan_sessions 의 N² registry read 가 1 read 로 (가장 큰 효과)
+Core optimizations:
+  - `parse_session` results are cached by (size, mtime) in `_PARSE_CACHE`, so
+    unchanged JSONL files cost one stat plus a dict lookup.
+  - `_PARSE_CACHE` is persisted to `~/.claude/gccfork-parse-cache.pickle`, so
+    new processes can reuse previous parse results. mtime/size validation
+    automatically invalidates stale entries.
+  - `load_registry` / `load_legacy_registry` are also cached by (mtime, data),
+    turning scan_sessions registry reads from N² into one read.
 
-이 모듈은 메인 / 다른 사이드카를 import 하지 않는다 (단방향).
+This module does not import the main app or other sidecars.
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 
-# ── 상수 ────────────────────────────────────────────────────────────────
+# ── Constants ───────────────────────────────────────────────────────────
 CLAUDE_ROOT = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_ROOT / "projects"
 SESSIONS_DIR = CLAUDE_ROOT / "sessions"
@@ -35,8 +36,8 @@ REGISTRY_PATH = CLAUDE_ROOT / "gccfork-registry.json"
 CCFORK_LEGACY_REGISTRY_PATH = CLAUDE_ROOT / "ccfork-registry.json"
 
 
-# 메시지 본문에 들어가지만 "사용자 발화"로 카운트하지 않는 prefix.
-# 메인의 INTERNAL_USER_PREFIXES 와 동일한 값 (settings.py 도 같은 값을 갖고 있다).
+# Prefixes that can appear in message bodies but should not count as user
+# utterances. Keep this aligned with the main module and settings sidecar.
 INTERNAL_USER_PREFIXES = (
     "<command-name>",
     "<command-message>",
@@ -60,7 +61,7 @@ UUID_ANY_RE = re.compile(
 _PARENT_4_RE = re.compile(r"\[<=\s*([0-9a-f]{4})[^\]]*\]")
 
 
-# ── 작은 헬퍼 ───────────────────────────────────────────────────────────
+# ── Small helpers ───────────────────────────────────────────────────────
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -75,17 +76,15 @@ def normalize_cwd(path: Optional[str]) -> Optional[str]:
 
 
 def extract_session_id_from_path(path: Path) -> Optional[str]:
-    """Claude 세션 파일명은 `<uuid>.jsonl` — stem 전체가 session_id."""
+    """Claude session filenames are `<uuid>.jsonl`; the stem is the session id."""
     match = UUID_SUFFIX_RE.search(path.stem)
     return match.group(1) if match else None
 
 
 def cwd_to_slug(cwd: str) -> str:
-    """Claude Code 프로젝트 폴더 이름 생성 규칙.
+    """Claude Code project folder naming rule.
 
-    `/`, `_`, 비ASCII 문자를 모두 `-`로 치환.
-    예: `/home/user/project`
-        → `-home-yooha-JOB-FOLD----------MindVault`
+    Replaces `/`, `_`, and non-ASCII characters with `-`.
     """
     out = []
     for ch in cwd:
@@ -97,16 +96,15 @@ def cwd_to_slug(cwd: str) -> str:
 
 
 def slug_to_cwd_candidates(slug: str) -> list[str]:
-    """역추론 불가 (정보 손실). jsonl `cwd` 필드 신뢰."""
+    """Cannot reverse reliably because slugging loses information."""
     return []
 
 
 # ── live sessions/<PID>.json ────────────────────────────────────────────
 def read_live_sessions() -> list[dict]:
-    """살아있는 모든 claude 인스턴스의 sessions/<PID>.json 읽기.
+    """Read sessions/<PID>.json for all live Claude instances.
 
-    각 dict 에는 sessions json 원본 필드 + `pid_alive: True` 만 있는 것 보장.
-    죽은 PID 의 stale json 은 자동 제외.
+    Stale files for dead PIDs are automatically excluded.
     """
     out: list[dict] = []
     if not SESSIONS_DIR.exists():
@@ -129,7 +127,7 @@ def read_live_sessions() -> list[dict]:
 
 
 def find_live_session_by_pid(pid: int) -> Optional[dict]:
-    """주어진 PID 의 활성 sessions/<PID>.json — 없으면 None."""
+    """Return the live sessions/<PID>.json for pid, or None."""
     f = SESSIONS_DIR / f"{pid}.json"
     if not f.exists() or not Path(f"/proc/{pid}").exists():
         return None
@@ -141,22 +139,22 @@ def find_live_session_by_pid(pid: int) -> Optional[dict]:
 
 
 def find_live_pid_by_sid(sid: str) -> Optional[int]:
-    """sid → 활성 claude PID (역방향). 멀티 인스턴스 시 첫 매치 (deprecated — 멀티 안 안전).
+    """Return the first live Claude PID for sid.
 
-    멀티 안전 버전을 원하면 `find_live_pids_by_sid(sid)` 사용.
+    Deprecated for multi-instance cases; use `find_live_pids_by_sid`.
     """
     pids = find_live_pids_by_sid(sid)
     return pids[0] if pids else None
 
 
 def find_live_pids_by_sid(sid: str) -> list[int]:
-    """sid → 활성 claude PID 들 (멀티 안전).
+    """Return all live Claude PIDs for sid.
 
-    sessions/<PID>.json 이 truth source — 포크_ccfork.md 핵심 원칙.
-    cmdline / mtime / fd / env 같은 간접 추측 절대 사용 X.
+    sessions/<PID>.json is the truth source. Avoid indirect guesses such as
+    cmdline, mtime, fd, or env.
 
-    같은 sid 가 여러 PID 에 떠있는 케이스 (드물지만 슬림+resume 직후 race)
-    에도 모두 반환하므로 destructive 액션 (kill 등) 에서 안전.
+    Returning all matches keeps destructive actions safe when rare races leave
+    multiple PIDs on the same sid.
     """
     if not sid:
         return []
@@ -171,10 +169,8 @@ def find_live_pids_by_sid(sid: str) -> list[int]:
 
 
 def all_active_sid_pid_map() -> dict[str, list[int]]:
-    """모든 활성 sid → PID 들 매핑. read_live_sessions 1회 호출로.
+    """Return active sid -> PID list using one read_live_sessions call."""
 
-    같은 sid 가 여러 PID 에 떠있어도 안전. 호출자가 sid → pids 로 lookup 가능.
-    """
     out: dict[str, list[int]] = {}
     for d in read_live_sessions():
         sid = d.get("sessionId")
@@ -186,7 +182,7 @@ def all_active_sid_pid_map() -> dict[str, list[int]]:
 
 
 def _parse_parent_sid_from_name(name: Optional[str]) -> Optional[str]:
-    """name 의 `[<= XXXX]` 패턴에서 부모 sid 앞 4자리 추출."""
+    """Extract parent sid prefix from a `[<= XXXX]` name marker."""
     if not name:
         return None
     m = _PARENT_4_RE.search(name)
@@ -194,23 +190,23 @@ def _parse_parent_sid_from_name(name: Optional[str]) -> Optional[str]:
 
 
 def _resolve_full_sid_from_prefix(prefix4: str, sessions_pool: list[dict]) -> Optional[str]:
-    """4자리 prefix → 전체 sid. live sessions 풀에서 unique 매치만 반환."""
+    """Resolve a 4-character prefix to a full sid when uniquely matched."""
     matches = [d["sessionId"] for d in sessions_pool
                if d.get("sessionId", "").startswith(prefix4)]
     return matches[0] if len(matches) == 1 else None
 
 
 def reconcile_registry_from_live_sessions(apply: bool = False) -> dict:
-    """모든 활성 sessions/<PID>.json 을 truth 로 삼아 registry 동기화.
+    """Reconcile registry entries from all active sessions/<PID>.json files.
 
-    동기화 규칙:
-      1. registry 미등록 → 새 entry 생성 (name 등 sessions json 그대로)
-      2. registry name 이 비어있고 live name 이 있음 → live name 으로 채움
-      3. registry name != live name → live name 으로 update (sessions 우선)
-      4. parent_id 누락 + live name 의 `[<= XXXX]` 패턴에서 추출 가능 → 부모 등록
-      5. pid 필드 자동 update (registry 에 pid 필드 없으면 추가)
+    Rules:
+      1. Missing registry entry -> create from live session data.
+      2. Empty registry name + live name -> fill from live name.
+      3. Different registry name -> live name wins.
+      4. Missing parent_id + `[<= XXXX]` marker -> resolve and store parent.
+      5. pid is updated from live state.
 
-    apply=False 면 dry-run (변경 없이 차이만 보고).
+    apply=False is dry-run.
     """
     live_sessions = read_live_sessions()
     reg = load_registry()
@@ -280,13 +276,14 @@ def reconcile_registry_from_live_sessions(apply: bool = False) -> dict:
     }
 
 
-# ── 메시지 본문 추출 ────────────────────────────────────────────────────
+# ── Message text extraction ─────────────────────────────────────────────
 def _extract_text_from_message(message: dict | None) -> str:
-    """Claude `message.content`은 str 또는 content block 리스트.
+    """Extract readable text from Claude `message.content`.
 
-    - str: 그대로 사용 (짧은 한 줄 유저 입력에 자주 쓰임)
-    - list: `type == "text"` 블록의 `text` 필드 연결
-    - 다른 블록(tool_use / tool_result / thinking / image)은 요약 제목 없이 스킵
+    - str: use directly, common for short user inputs.
+    - list: join the `text` field of `type == "text"` blocks.
+    - other blocks such as tool_use, tool_result, thinking, and image are
+      skipped for title/summary extraction.
     """
     if not isinstance(message, dict):
         return ""
@@ -323,7 +320,7 @@ def _append_edge_message(buf: list, msg, keep_edge: int) -> None:
         buf.pop(0)
 
 
-# ── 데이터 모델 ─────────────────────────────────────────────────────────
+# ── Data model ──────────────────────────────────────────────────────────
 @dataclass
 class Msg:
     role: str
@@ -350,7 +347,7 @@ class Session:
     first_parent_uuid: Optional[str] = None
     ai_summary: Optional[str] = None
     live_turn_count: int = 0
-    important: bool = False  # 빨간 ★ 마크 — registry 에 영속화, 클릭으로 토글
+    important: bool = False  # Red star marker, persisted in registry.
 
     @property
     def title(self) -> str:
@@ -362,8 +359,9 @@ class Session:
 
 
 # ── registry I/O ────────────────────────────────────────────────────────
-# scan_sessions 가 N² 번 registry_get 을 하면서 매번 파일 read + json.loads 했음.
-# (mtime, data) 키로 in-process 캐시 — 같은 process 안에서 변경 없으면 read 0회.
+# scan_sessions used to call registry_get N² times, repeatedly reading and
+# json.loads-ing the file. Cache by (mtime, data); unchanged registry reads cost
+# zero file reads inside the same process.
 _REGISTRY_CACHE: Optional[tuple[float, dict]] = None
 _LEGACY_REGISTRY_CACHE: Optional[tuple[float, dict]] = None
 
@@ -388,7 +386,7 @@ def load_registry() -> dict:
 
 
 def load_legacy_registry() -> dict:
-    """기존 ccfork-registry.json 읽기 (read-only)."""
+    """Read legacy ccfork-registry.json as read-only data."""
     global _LEGACY_REGISTRY_CACHE
     if not CCFORK_LEGACY_REGISTRY_PATH.exists():
         _LEGACY_REGISTRY_CACHE = None
@@ -411,7 +409,7 @@ def save_registry(data: dict) -> None:
     global _REGISTRY_CACHE
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     REGISTRY_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    # 새 mtime 으로 캐시 갱신 — load_registry 가 즉시 hit
+    # Refresh cache with the new mtime so load_registry hits immediately.
     try:
         _REGISTRY_CACHE = (REGISTRY_PATH.stat().st_mtime, data)
     except OSError:
@@ -419,11 +417,10 @@ def save_registry(data: dict) -> None:
 
 
 def registry_set(session_id: str, **fields) -> None:
-    """쓰기는 오직 gccfork-registry.json 에만 (legacy는 건드리지 않음).
+    """Write only to gccfork-registry.json; never mutate legacy registry.
 
-    parse cache 의 그 sid entry 자동 무효화 — registry 변경 (name/important/etc)
-    이 다음 reload 시 즉시 반영되도록. 무효화 안 하면 cache hit 으로 옛 Session
-    객체 반환되어 변경 안 보이는 버그 (2026-05-06 발견).
+    Automatically invalidates parse cache entries for this sid so registry
+    changes such as name/important are visible on the next reload.
     """
     reg = load_registry()
     entry = reg["sessions"].get(session_id, {})
@@ -434,7 +431,7 @@ def registry_set(session_id: str, **fields) -> None:
             entry[key] = value
     reg["sessions"][session_id] = entry
     save_registry(reg)
-    # parse cache 의 해당 sid entry 무효화
+    # Invalidate the parse cache entry for this sid.
     try:
         for p in list(_PARSE_CACHE.keys()):
             cached = _PARSE_CACHE.get(p)
@@ -446,7 +443,7 @@ def registry_set(session_id: str, **fields) -> None:
 
 
 def registry_get(session_id: str) -> dict:
-    """gccfork 우선 + ccfork legacy fallback (merge)."""
+    """Merge gccfork registry data over ccfork legacy fallback data."""
     own = load_registry()["sessions"].get(session_id, {}) or {}
     legacy = load_legacy_registry()["sessions"].get(session_id, {}) or {}
     if not legacy:
@@ -457,7 +454,7 @@ def registry_get(session_id: str) -> dict:
 
 
 def registry_remove(session_id: str) -> None:
-    """gccfork-registry에서만 제거. legacy는 건드리지 않음."""
+    """Remove from gccfork-registry only; legacy registry is read-only."""
     reg = load_registry()
     reg["sessions"].pop(session_id, None)
     save_registry(reg)
@@ -589,14 +586,14 @@ def pref_set(key: str, value) -> None:
     save_prefs(prefs)
 
 
-# ── 부모 추론 / 색상 ────────────────────────────────────────────────────
-# scan_sessions 후처리에서 자동 추론된 parent를 등록하는 런타임 override.
-# registry(영구)에 쓰지 않고 메모리에만 보관 — jsonl에서 재계산 가능하므로.
+# ── Parent inference / colors ───────────────────────────────────────────
+# Runtime override for parents inferred during scan_sessions post-processing.
+# Keep this in memory only because it can be recalculated from JSONL.
 _RUNTIME_PARENT_OVERRIDE: dict[str, str] = {}
 
 
 def _parent_for(session_id: str) -> Optional[str]:
-    """registry(own + legacy fallback) 우선, 없으면 런타임 자동 추론 맵."""
+    """Prefer registry parent, then runtime inferred parent map."""
     explicit = registry_get(session_id).get("parent_id")
     return explicit or _RUNTIME_PARENT_OVERRIDE.get(session_id)
 
@@ -623,21 +620,19 @@ _COLOR_STYLES = [
     "red", "dark_orange", "yellow", "green", "blue", "magenta",
     "bright_red", "orange1", "bright_green", "bright_blue", "bright_magenta", "rgb(139,69,19)",
 ]
-# 사용자 지정 6-distinct 팔레트 — 1=🔴 2=🟢 3=🔵 4=🟨 5=🟣 6=🟠 순서.
+# User-selected 6-distinct palette order.
 _DISTINCT_6_INDICES = [6, 8, 9, 2, 10, 7]
 
-# refresh_list 시점에 App 이 갱신하는 root_id → color_index 맵.
+# root_id -> color_index map refreshed by the app during refresh_list.
 _ROOT_COLOR_MAP: dict[str, int] = {}
 
 
 def _set_root_color_map(roots: list[str]) -> None:
-    """루트 목록에 색 인덱스 영구 할당. **한 번 배정된 색은 절대 변경되지 않음.**
+    """Persistently assign color indices to root sessions.
 
-    - 1순위: registry 에 이미 색이 저장돼 있으면 그대로 사용
-    - 2순위: 새 루트면 "다음 빈 슬롯" 배정 후 registry 에 영구 저장
-        - 6-distinct 6슬롯 중 비어있는 가장 낮은 것
-        - 6개 다 차면 12색 풀의 비어있는 가장 낮은 것
-        - 12개 다 차면 sha256 폴백 (충돌 허용)
+    Once assigned, a color should not change. Existing registry colors win.
+    New roots get the next free slot from the 6-distinct palette, then the
+    12-color pool, then a deterministic sha256 fallback.
     """
     global _ROOT_COLOR_MAP
     seen: set[str] = set()
@@ -683,7 +678,7 @@ def _set_root_color_map(roots: list[str]) -> None:
 
 _VSCODE_TERMINAL_COLORS = [
     "terminal.ansiRed",            # 🟥
-    "terminal.ansiYellow",         # 🟧 (orange → yellow 대체)
+    "terminal.ansiYellow",         # 🟧 (orange approximated with yellow)
     "terminal.ansiYellow",         # 🟨
     "terminal.ansiGreen",          # 🟩
     "terminal.ansiBlue",           # 🟦
@@ -734,25 +729,25 @@ def _color_style_for_session(session_id: str) -> str:
 
 
 def _vscode_terminal_color_for_session(session_id: str) -> str:
-    """VSCode 터미널 패널 컬러 태그용 ThemeColor ID."""
+    """ThemeColor id for VSCode terminal panel color tags."""
     return _VSCODE_TERMINAL_COLORS[_color_index_for_session(session_id)]
 
 
-# ── 캐시 + 파서 + 스캐너 ────────────────────────────────────────────────
-# (path, size, mtime) 키로 parse 결과 캐시.
+# ── Cache + parser + scanner ────────────────────────────────────────────
+# Parse-result cache keyed by (path, size, mtime).
 # value: (size, mtime, Session, frozenset[uuid]).
-# 변경되지 않은 jsonl 은 stat 한 번 + dict lookup 으로 끝 → 풀파싱 회피.
+# Unchanged JSONL files cost one stat plus one dict lookup.
 _PARSE_CACHE: dict[Path, tuple[int, float, "Session", frozenset]] = {}
 
-# 디스크 영속 캐시 — process 종료 후에도 살아남음.
-# 새 process 시작 시 mtime/size 검증해서 살아있는 항목만 in-memory 로 복원.
+# Disk-persistent cache survives process exit. On startup, restore only entries
+# whose mtime/size still match current files.
 _DISK_CACHE_FILE = CLAUDE_ROOT / "gccfork-parse-cache.pickle"
-# 캐시 변경 여부 — atexit 시 변경 없으면 save skip (디스크 write 절약).
+# Dirty flag. If unchanged, atexit skips disk writes.
 _PARSE_CACHE_DIRTY = False
 
 
 def invalidate_parse_cache(path: Optional[Path] = None) -> None:
-    """파싱 캐시 무효화. path 지정 시 해당 항목만, None 이면 전체."""
+    """Invalidate one parse-cache entry, or all entries when path is None."""
     global _PARSE_CACHE_DIRTY
     if path is None:
         if _PARSE_CACHE:
@@ -764,7 +759,7 @@ def invalidate_parse_cache(path: Optional[Path] = None) -> None:
 
 
 def prune_parse_cache() -> int:
-    """존재하지 않는 path 항목 정리 (멀티 삭제 후 stale 정리). 정리한 개수 반환."""
+    """Remove entries for missing paths and return the number removed."""
     global _PARSE_CACHE_DIRTY
     stale = [p for p in _PARSE_CACHE if not p.exists()]
     for p in stale:
@@ -775,12 +770,12 @@ def prune_parse_cache() -> int:
 
 
 def _load_disk_cache() -> int:
-    """프로세스 시작 시 디스크 캐시 → in-memory 복원.
+    """Restore disk cache entries into memory at process startup.
 
-    각 entry 의 (size, mtime) 가 현재 파일과 일치해야 살림. 그 외는 모두 버림.
-    pickle 파일이 없거나 깨졌으면 조용히 무시.
+    Each entry survives only when its size and mtime still match the current
+    file. Missing or corrupt pickle files are ignored silently.
 
-    Returns: 복원된 entry 개수.
+    Returns the number of restored entries.
     """
     if not _DISK_CACHE_FILE.exists():
         return 0
@@ -807,15 +802,15 @@ def _load_disk_cache() -> int:
 
 
 def _save_disk_cache() -> None:
-    """프로세스 종료 시 디스크에 캐시 저장. atexit 으로 등록.
+    """Save parse cache to disk at process exit.
 
-    `_PARSE_CACHE_DIRTY` 가 False 면 save skip (변경 없음 = 디스크 그대로).
+    Registered with atexit. When `_PARSE_CACHE_DIRTY` is False, skip the write.
     """
     if not _PARSE_CACHE_DIRTY:
         return
     try:
         _DISK_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # 원자적 write — temp 파일에 쓴 뒤 rename.
+        # Atomic write: write a temp file, then rename.
         tmp = _DISK_CACHE_FILE.with_suffix(".pickle.tmp")
         with tmp.open("wb") as fh:
             pickle.dump(dict(_PARSE_CACHE), fh, protocol=pickle.HIGHEST_PROTOCOL)
@@ -824,8 +819,7 @@ def _save_disk_cache() -> None:
         pass
 
 
-# 모듈 import 시점에 디스크 캐시 로드 + atexit save 등록.
-# 메인이 처음 `from gccfork_sessions import ...` 할 때 한 번 실행.
+# Load disk cache and register atexit save at module import time.
 _load_disk_cache()
 atexit.register(_save_disk_cache)
 
@@ -835,9 +829,9 @@ def parse_session(
     keep_edge: int = 3,
     uuid_sink: Optional[set] = None,
 ) -> Optional[Session]:
-    """Claude Code 세션 jsonl 1개를 파싱해 `Session`을 반환.
+    """Parse one Claude Code session JSONL into a `Session`.
 
-    Claude 포맷의 각 줄은 self-contained JSON 이벤트:
+    Each Claude-format line is a self-contained JSON event:
       {
         "sessionId": "...", "type": "user"|"assistant"|"summary"|"system",
         "message": {"role": "...", "content": str | list[block]},
@@ -846,10 +840,10 @@ def parse_session(
         "timestamp": "..."
       }
 
-    `uuid_sink`가 주어지면 이 세션의 모든 message uuid를 담아 반환.
+    If `uuid_sink` is provided, all message UUIDs in this session are added to it.
 
-    **캐시**: (size, mtime) 가 일치하면 풀파싱 생략 + cached uuid set 을
-    `uuid_sink` 에 부어준다.
+    Cache: when (size, mtime) match, skip full parsing and reuse the cached
+    Session plus cached UUID set.
     """
     try:
         stat = jsonl_path.stat()
@@ -876,10 +870,10 @@ def parse_session(
     compact_count = 0
     first_parent_uuid: Optional[str] = None
     first_real_uuid_seen = False
-    live_turn_count = 0  # 마지막 isCompactSummary 이후 user 턴
+    live_turn_count = 0  # user turns since the last isCompactSummary
 
-    # 캐시용 — 항상 모든 line uuid 를 모은다 (uuid_sink 가 None 이어도).
-    # 다음 호출이 uuid_sink 를 줄 수 있으니까.
+    # Always collect line UUIDs for cache, even when uuid_sink is None, because
+    # a later call may request them.
     all_uuids: set[str] = set()
 
     try:
@@ -891,7 +885,7 @@ def parse_session(
 
                 if '"isCompactSummary":true' in line or '"isCompactSummary": true' in line:
                     compact_count += 1
-                    live_turn_count = 0  # 압축 직후부터 라이브 카운트 재시작
+                    live_turn_count = 0  # Restart live count after compaction.
 
                 try:
                     obj = json.loads(line)
@@ -1001,18 +995,19 @@ def parse_session(
 
 
 def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
-    """메타-only 빠른 파싱 — 첫 화면 표시용.
+    """Fast metadata-only parse for the first screen.
 
-    - stat (size, mtime, sid 는 파일명에서)
-    - **첫 5KB**: cwd, version, sessionId, first_parent_uuid 같은 헤더 필드
-    - **마지막 ~10KB**: last user msg → auto_summary, live_turn 근사
+    - stat for size/mtime; sid from filename
+    - first 5KB for header fields such as cwd, version, sessionId,
+      first_parent_uuid
+    - last 16KB for the latest user message -> auto_summary
 
-    `turn_count = -1` 로 표시 (= 미백필 마커). UI 는 "…" 같은 placeholder 로 그림.
-    `uuid_sink` / `compact_count` 미채움. 부모 자동 추론은 백필 후에야 정확.
+    `turn_count = -1` marks "not backfilled yet"; the UI can draw a placeholder.
+    uuid_sink / compact_count are not filled. Parent inference becomes accurate
+    only after backfill.
 
-    캐시에 hit 이 있으면 풀파싱 결과 그대로 반환 (cache 가 우선).
-    캐시 miss 일 때만 메타-only 로 빠르게 채움. 캐시에 저장하지 않음
-    (풀파싱 결과로 덮어쓰기 위해).
+    Cache hits return full parse results. Cache misses return quick metadata and
+    are not stored so a later full parse can replace them.
     """
     try:
         stat = jsonl_path.stat()
@@ -1021,7 +1016,7 @@ def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
     size = stat.st_size
     mtime_ts = stat.st_mtime
 
-    # 캐시 hit 이면 풀파싱 결과 그대로 반환 (turn_count 등 정확).
+    # Cache hits contain accurate full-parse fields such as turn_count.
     cached = _PARSE_CACHE.get(jsonl_path)
     if cached is not None and cached[0] == size and cached[1] == mtime_ts:
         return cached[2]
@@ -1034,8 +1029,8 @@ def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
     first_parent_uuid: Optional[str] = None
     auto_summary: Optional[str] = None
 
-    HEAD_BYTES = 5 * 1024     # 5KB head — 보통 첫 5라인이면 cwd/version 다 잡힘
-    TAIL_BYTES = 16 * 1024    # 16KB tail — 마지막 user 메시지 1~2개 가져오기 위함
+    HEAD_BYTES = 5 * 1024     # Usually enough for cwd/version in first lines.
+    TAIL_BYTES = 16 * 1024    # Enough for the latest user message or two.
 
     try:
         with jsonl_path.open("rb") as fh:
@@ -1062,7 +1057,7 @@ def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
                     ver = obj.get("version")
                     if isinstance(ver, str) and ver:
                         originator = f"claude-code {ver}"
-                # 첫 real user/assistant 라인의 parentUuid 기록
+                # Capture parentUuid from the first real user/assistant line.
                 typ = obj.get("type")
                 if not first_real_uuid_seen and typ in {"user", "assistant"}:
                     if not (obj.get("isSidechain") or obj.get("isMeta")):
@@ -1072,19 +1067,19 @@ def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
                             first_parent_uuid = parent_uuid
 
             # ── TAIL ────────────────────────────────────────────────────
-            # seek 으로 EOF 부근 읽고 마지막 user 메시지 추출.
+            # Seek near EOF and extract the latest user message.
             if size > HEAD_BYTES:
                 tail_start = max(HEAD_BYTES, size - TAIL_BYTES)
                 fh.seek(tail_start)
                 tail_bytes = fh.read()
             else:
-                tail_bytes = head_bytes  # 전체가 head 안에 들어감
+                tail_bytes = head_bytes  # Whole file fits in head.
             tail_text = tail_bytes.decode("utf-8", errors="ignore")
             tail_lines = tail_text.splitlines()
-            # 마지막 라인은 부분일 수 있으니 첫 라인도 부분일 수 있음 → 양끝 1개 버림
+            # The first/last tail lines can be partial; trim the first when possible.
             if len(tail_lines) > 2:
                 tail_lines = tail_lines[1:]
-            # 뒤에서부터 user 메시지 찾기
+            # Search backwards for the latest user message.
             for raw in reversed(tail_lines):
                 raw = raw.strip()
                 if not raw:
@@ -1119,7 +1114,7 @@ def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
         id=session_id,
         jsonl_path=jsonl_path,
         mtime=mtime,
-        turn_count=-1,            # ← 미백필 마커
+        turn_count=-1,            # not-backfilled marker
         size_bytes=size,
         first_msgs=[],
         last_msgs=[],
@@ -1139,25 +1134,24 @@ def parse_session_meta_only(jsonl_path: Path) -> Optional[Session]:
 
 
 def _session_rank(session: Session) -> tuple[int, float, int]:
-    """같은 session.id가 여러 파일에 있을 때 더 신뢰할 파일 우선순위.
+    """Reliability rank when multiple files share the same session.id.
 
-    1. 파일명 suffix UUID와 실제 session.id가 일치하는 파일
-    2. 더 최근 mtime
-    3. 더 큰 파일
+    1. Filename suffix UUID matches actual session.id.
+    2. Newer mtime.
+    3. Larger file.
     """
     path_matches = int(extract_session_id_from_path(session.jsonl_path) == session.id)
     return (path_matches, session.mtime.timestamp(), session.size_bytes)
 
 
 def _session_jsonl_paths(current_cwd: Optional[str], scope_all: bool) -> Iterator[Path]:
-    """스캔 대상 jsonl 경로 이터레이터.
+    """Iterate JSONL paths to scan.
 
-    - scope_all: 모든 프로젝트 폴더의 세션 (`projects/*/*.jsonl`)
-    - scope_current: 현재 cwd의 슬러그 폴더만 (`projects/<slug>/*.jsonl`)
+    - scope_all: sessions from every project folder (`projects/*/*.jsonl`)
+    - scope_current: only the slug folder for current cwd
 
-    `.bak.<timestamp>.jsonl` 백업 파일은 제외 — slim_fork_session_with
-    (in_place=True, backup=True) 가 만드는 자동 백업은 본 리스트에 등장하면
-    안 됨. 휴지통 이동 후에도 백업이 본 폴더에 남아 sid 가 부활하는 버그 방지.
+    Excludes `.bak.<timestamp>.jsonl` backups so backup files never reappear as
+    live sessions after trash/delete flows.
     """
     if not PROJECTS_DIR.exists():
         return
@@ -1173,11 +1167,11 @@ def _session_jsonl_paths(current_cwd: Optional[str], scope_all: bool) -> Iterato
 
 
 def scan_sessions(current_cwd: Optional[str], scope_all: bool) -> list[Session]:
-    """Claude 세션 폴더를 스캔해 Session 리스트 반환.
+    """Scan Claude session folders and return Session objects.
 
-    후처리로 `first_parent_uuid` ↔ 다른 세션의 message uuid set을 교차 매칭
-    해서 `parent_id` / `fork_type`을 자동 채운다. registry에 이미 부모 정보가
-    기록된 세션(하드 분기 등)은 건드리지 않음.
+    Post-processing cross-matches `first_parent_uuid` against other sessions'
+    message UUID sets to infer parent_id / fork_type. Existing registry parent
+    data, such as hard forks, is respected.
     """
     target_cwd = normalize_cwd(current_cwd)
     deduped: dict[str, Session] = {}
@@ -1194,7 +1188,7 @@ def scan_sessions(current_cwd: Optional[str], scope_all: bool) -> list[Session]:
             for u in local_uuids:
                 uuid_to_sessions.setdefault(u, []).append(session.id)
 
-    # 부모 자동 추론 — registry(own + legacy)에 이미 parent_id가 있으면 존중.
+    # Parent auto-inference: respect parent_id already stored in registry.
     _RUNTIME_PARENT_OVERRIDE.clear()
     for session in deduped.values():
         if session.parent_id:
@@ -1248,13 +1242,14 @@ def scan_sessions(current_cwd: Optional[str], scope_all: bool) -> list[Session]:
 
 
 def scan_sessions_fast(current_cwd: Optional[str], scope_all: bool) -> list[Session]:
-    """메타-only 빠른 스캔 — 첫 화면 표시용.
+    """Fast metadata-only scan for the first screen.
 
-    캐시 hit 인 jsonl 은 풀파싱 결과 그대로 (정확). cache miss 인 것만
-    `parse_session_meta_only` 로 메타만 채움. 부모 자동 추론은 registry
-    parent_id 기반 1차만 — uuid_to_sessions 인덱스 없음 (백필 후 재실행).
+    Cache hits return accurate full-parse results. Cache misses use
+    `parse_session_meta_only`. Parent inference is limited to registry parent_id
+    until backfill rebuilds the uuid_to_sessions index.
 
-    백필 worker 가 끝난 뒤 `scan_sessions` 를 다시 호출해서 정확한 트리로 재배치.
+    After the backfill worker completes, call `scan_sessions` again for the
+    accurate tree.
     """
     target_cwd = normalize_cwd(current_cwd)
     deduped: dict[str, Session] = {}
@@ -1266,7 +1261,7 @@ def scan_sessions_fast(current_cwd: Optional[str], scope_all: bool) -> list[Sess
         if existing is None or _session_rank(session) > _session_rank(existing):
             deduped[session.id] = session
 
-    # 1단계 부모 추론만: registry 에 명시된 parent_id 사용.
+    # Phase-1 parent inference: use explicit registry parent_id only.
     _RUNTIME_PARENT_OVERRIDE.clear()
     for session in deduped.values():
         if session.parent_id:
@@ -1278,15 +1273,15 @@ def scan_sessions_fast(current_cwd: Optional[str], scope_all: bool) -> list[Sess
 
 
 def reinfer_parents_from_cache(sessions: list[Session]) -> None:
-    """모든 세션이 풀파싱 끝난 뒤 호출 — 캐시의 uuid set 으로 부모 자동 추론.
+    """Infer parents from cached UUID sets after all sessions are fully parsed.
 
-    `_PARSE_CACHE` 에 저장된 uuid frozenset 을 읽어 uuid_to_sessions 인덱스를
-    만들고, parent_id 가 없는 세션의 first_parent_uuid 와 매칭. 결과는
-    `session.parent_id` + `_RUNTIME_PARENT_OVERRIDE` 에 반영.
+    Reads UUID frozensets from `_PARSE_CACHE`, builds a uuid_to_sessions index,
+    and matches sessions without parent_id via first_parent_uuid. Results are
+    written to `session.parent_id` and `_RUNTIME_PARENT_OVERRIDE`.
     """
     by_id: dict[str, Session] = {s.id: s for s in sessions}
 
-    # uuid → session id list (cache 의 frozenset 활용)
+    # uuid -> session id list, using cache frozensets.
     uuid_to_sessions: dict[str, list[str]] = {}
     for session in sessions:
         cached = _PARSE_CACHE.get(session.jsonl_path)
@@ -1352,7 +1347,7 @@ def find_session_by_id(session_id: str) -> Optional[Session]:
             best = session
     if best is not None:
         return best
-    # 활성 jsonl 에서 못 찾으면 archive 폴더도 검색 (lazy import — cycle 방지).
+    # If not found in active JSONL files, search archive lazily to avoid cycles.
     try:
         from gccfork_archive import find_archived_session
     except ImportError:

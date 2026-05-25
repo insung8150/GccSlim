@@ -1,62 +1,62 @@
-"""gccfork_config_files.py — 설정/메모리 파일 편집기 spawn 모듈.
+"""gccfork_config_files.py — editor spawn module for config and memory files.
 
-세션 시작 시 자동 주입되는 파일들 (CLAUDE.md / MEMORY.md / GLOBAL_MEMORY.md
-등) 을 TUI 안에서 클릭 한 번으로 외부 편집기 (기본 VSCode) 로 열기 위한
-사이드카. mono 비대화 정책 — 메인 gccfork 는 import + Mixin 결합 + 버튼/키
-바인딩만 추가 (~15 lines).
-
-═══════════════════════════════════════════════════════════════════════════
-⚠️ subprocess 사전 주의사항 (반드시 숙지) — 위반 시 사용자 작업 손실
-═══════════════════════════════════════════════════════════════════════════
-
-이 파일이 외부 편집기를 spawn 하는 핵심이라 다음 3가지를 반드시 지킨다:
-
-[1] start_new_session=True  — 별개 프로세스 그룹/세션으로 detach
-    이유: subprocess.Popen 기본 = TUI 의 자식 프로세스. TUI 가 죽으면
-         자식들도 SIGHUP 받아 같이 죽음. 사용자가 "VSCode 켜놓고 TUI 만
-         닫기" 했을 때 편집 중이던 파일이 강제 종료됨.
-    검증: TUI 죽인 후 VSCode 가 살아있어야 정상.
-
-[2] stdout=DEVNULL, stderr=DEVNULL  — 표준 스트림 모두 버림
-    이유: VSCode 시작 시 stderr 로 GTK warning, GPU 메시지, dbus 잡소리
-         등 출력. 그게 textual TUI 가 그리고 있는 같은 터미널 화면에
-         직접 인쇄 → 박스 보더 깨지고 위젯 망가짐. 한 번 깨지면 화면
-         전체 redraw 안 하면 복구 안 됨.
-    검증: spawn 후 TUI 화면이 그대로여야 정상.
-
-[3] FileNotFoundError 명시적 catch + notify
-    이유: `code` 명령 미설치 시 silently FileNotFoundError 던지고 끝.
-         사용자는 "버튼 눌렀는데 왜 안 열려?" 만 봄. notify 로 어떤
-         editor 가 없는지 + fallback 결과를 명확히 알린다.
-    검증: 일부러 없는 editor 지정해서 notify 메시지 잘 뜨는지.
-
-추가 주의:
-  - cwd 인자 안 넘김 → spawn 된 편집기가 사용자 PWD 기준 동작 (덜 혼란)
-  - shell=True 절대 사용 X → 경로에 공백/한글 들어갈 때 escape 사고
+Sidecar module for opening session-injected files such as CLAUDE.md,
+MEMORY.md, and GLOBAL_MEMORY.md in an external editor from the TUI with one
+click. It follows the mono non-interactive policy: the main gccfork file only
+imports the mixin and wires buttons/keys.
 
 ═══════════════════════════════════════════════════════════════════════════
+Subprocess preconditions — violating these can lose user work
+═══════════════════════════════════════════════════════════════════════════
 
-## 편집기 선택 우선순위
+This file is the external-editor spawn boundary. Keep these three rules:
 
-1. prefs `config_editor` (사용자가 ⚙ 설정 → 📝 편집기 탭에서 지정)
-2. $EDITOR 환경변수
+[1] start_new_session=True — detach into a separate process group/session.
+    Reason: subprocess.Popen defaults to a child of the TUI. If the TUI exits,
+    child editors can receive SIGHUP and die too. Users must be able to close
+    the TUI while keeping VSCode open.
+    Verification: VSCode should survive after killing the TUI.
+
+[2] stdout=DEVNULL, stderr=DEVNULL — discard both standard streams.
+    Reason: VSCode startup can print GTK/GPU/dbus warnings to stderr. If those
+    bytes hit the same terminal that Textual is drawing into, borders and
+    widgets become corrupted until a full redraw.
+    Verification: the TUI screen should remain intact after spawning.
+
+[3] Explicitly catch FileNotFoundError and notify.
+    Reason: if `code` is not installed, a silent FileNotFoundError leaves users
+    with no explanation. The notification must identify the missing editor and
+    the fallback result.
+    Verification: configure a non-existent editor and confirm the notification.
+
+Additional rules:
+  - Do not pass cwd; spawned editors should use the user's current PWD.
+  - Never use shell=True; paths with spaces or non-ASCII characters must not
+    depend on shell escaping.
+
+═══════════════════════════════════════════════════════════════════════════
+
+## Editor selection priority
+
+1. prefs `config_editor`
+2. $EDITOR environment variable
 3. code (VSCode)
 4. cursor
-5. nano (마지막 fallback)
+5. nano (last fallback)
 
-`auto` 선택 시 위 순서대로 첫 번째 발견되는 명령 사용.
+When set to `auto`, use the first command found in the priority order above.
 
-## 발견할 파일 5종 + 동적
+## Discoverable files
 
-| 이모지 | 라벨 | 경로 | 비고 |
+| Emoji | Label | Path | Notes |
 |---|---|---|---|
-| 🌐 | 글로벌 CLAUDE.md | `~/.claude/CLAUDE.md` | 항상 |
-| 📂 | 프로젝트 CLAUDE.md | `<cwd>/CLAUDE.md` | cwd 기준 |
-| 🧠 | 프로젝트 MEMORY.md | `~/.claude/projects/<slug>/memory/MEMORY.md` | 자동 발견 |
-| 🌍 | GLOBAL_MEMORY.md | `~/.gccslim/memory/GLOBAL_MEMORY.md` | 있을 때만 |
-| 🖥 | system-apps.md | `~/.gccslim/memory/system-apps.md` | 있을 때만 |
-| 📁 | 메모리 폴더 전체 | `~/.claude/projects/<slug>/memory/` (디렉토리) | VSCode/cursor 만 |
-| 📝 | 메모리 *.md 개별 | 같은 폴더 안 모든 .md | 동적 expand |
+| 🌐 | Global CLAUDE.md | `~/.claude/CLAUDE.md` | Always |
+| 📂 | Project CLAUDE.md | `<cwd>/CLAUDE.md` | Based on cwd |
+| 🧠 | Project MEMORY.md | `~/.claude/projects/<slug>/memory/MEMORY.md` | Auto-discovered |
+| 🌍 | GLOBAL_MEMORY.md | `~/.gccslim/memory/GLOBAL_MEMORY.md` | When present |
+| 🖥 | system-apps.md | `~/.gccslim/memory/system-apps.md` | When present |
+| 📁 | Memory folder | `~/.claude/projects/<slug>/memory/` (directory) | VSCode/cursor only |
+| 📝 | Individual memory *.md | all .md files in the folder | Expanded dynamically |
 """
 from __future__ import annotations
 
@@ -67,9 +67,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# textual — 메인 gccfork 가 PEP 723 venv 안에서만 import 함. 데이터 함수만
-# 사용하는 단위 테스트는 이 import 없이 따로 호출 가능 (try/except 가드 안 둠 —
-# import 자체가 실패하면 사이드카 import 실패 → 메인이 fallback).
+# Textual is imported only inside the main gccfork PEP 723 environment. Unit
+# tests that only exercise data helpers should avoid importing this module.
+# There is no try/except guard here: if this sidecar cannot import, the main
+# app should fall back explicitly.
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -84,45 +85,46 @@ from gccfork_sessions import (
 )
 
 
-# ─── 편집기 후보 + 우선순위 ─────────────────────────────────────────────
+# ─── Editor candidates and priority ─────────────────────────────────────
 EDITOR_CANDIDATES = ["code", "cursor", "nano"]
-EDITOR_DEFAULT = "auto"  # auto = prefs → $EDITOR → 후보 순서대로
+EDITOR_DEFAULT = "auto"  # auto = prefs -> $EDITOR -> candidate order
 
 
 def resolve_editor() -> tuple[Optional[str], str]:
-    """편집기 명령 + 어떻게 결정했는지 사유 반환.
+    """Return the editor command plus the reason it was selected.
 
     Returns:
-        (editor_cmd, reason) — editor_cmd 가 None 이면 모두 fallback 실패.
-        reason 은 사용자에게 보여줄 한 줄 설명 ("prefs", "$EDITOR", "auto:code" 등).
+        (editor_cmd, reason). If editor_cmd is None, all fallbacks failed.
+        reason is a short user-facing explanation such as "prefs", "$EDITOR",
+        or "auto:code".
     """
-    # 1. prefs (사용자가 명시 지정)
+    # 1. prefs (explicit user setting)
     pref = str(pref_get("config_editor", EDITOR_DEFAULT))
     if pref != EDITOR_DEFAULT and pref:
         if shutil.which(pref):
             return pref, f"prefs ({pref})"
-        # prefs 에 적힌 게 PATH 에 없으면 auto 로 폴백
-        return _auto_resolve("prefs 명령 없음 → auto fallback")
+        # If the configured command is not on PATH, fall back to auto.
+        return _auto_resolve("prefs command missing -> auto fallback")
 
-    # 2. auto 모드
+    # 2. auto mode
     return _auto_resolve("auto")
 
 
 def _auto_resolve(prefix: str) -> tuple[Optional[str], str]:
-    """auto 우선순위: $EDITOR → EDITOR_CANDIDATES 순서."""
+    """Auto priority: $EDITOR, then EDITOR_CANDIDATES in order."""
     env_editor = os.environ.get("EDITOR")
     if env_editor and shutil.which(env_editor.split()[0]):
         return env_editor, f"{prefix}: $EDITOR={env_editor}"
     for cand in EDITOR_CANDIDATES:
         if shutil.which(cand):
             return cand, f"{prefix}: {cand}"
-    return None, f"{prefix}: 모든 후보 ({', '.join(EDITOR_CANDIDATES)}) 미설치"
+    return None, f"{prefix}: all candidates ({', '.join(EDITOR_CANDIDATES)}) not installed"
 
 
-# ─── 파일 메타 ──────────────────────────────────────────────────────────
+# ─── File metadata ──────────────────────────────────────────────────────
 @dataclass
 class ConfigFileEntry:
-    """편집 가능한 설정/메모리 파일 한 항목."""
+    """One editable config/memory file entry."""
     label: str
     emoji: str
     path: Path
@@ -133,7 +135,7 @@ class ConfigFileEntry:
 
     @property
     def display_path(self) -> str:
-        """홈 디렉토리는 ~ 로 줄여서 표시."""
+        """Display paths under the home directory with a leading ~."""
         try:
             rel = self.path.relative_to(Path.home())
             return f"~/{rel}"
@@ -142,17 +144,17 @@ class ConfigFileEntry:
 
     @property
     def short_meta(self) -> str:
-        """카드 우측 메타 — '3.1KB · 2일 전' 또는 '없음'."""
+        """Right-side card metadata, for example size and date."""
         if not self.exists:
-            return "(없음)"
+            return "(none)"
         if self.is_dir:
-            return "폴더"
+            return "folder"
         kb = max(1, self.size_bytes // 1024)
         return f"{kb}KB · {self.mtime_iso[:10] if self.mtime_iso else '?'}"
 
 
 def _file_entry(label: str, emoji: str, path: Path, is_dir: bool = False) -> ConfigFileEntry:
-    """경로 검사 + 메타 채워서 entry 만들기 (없는 파일도 entry 만들어 회색 표시)."""
+    """Build an entry with path metadata; missing files still get an entry."""
     entry = ConfigFileEntry(label=label, emoji=emoji, path=path, is_dir=is_dir)
     try:
         st = path.stat()
@@ -168,34 +170,35 @@ def _file_entry(label: str, emoji: str, path: Path, is_dir: bool = False) -> Con
 
 
 def discover_config_files(current_cwd: Optional[str]) -> list[ConfigFileEntry]:
-    """현재 cwd 기준 편집 가능한 파일들 발견.
+    """Discover editable files for the current cwd.
 
-    cwd 없으면 (예: TUI 가 임의 경로에서 떴을 때) 프로젝트 CLAUDE.md / MEMORY.md
-    는 entry 추가하되 exists=False.
+    If cwd is unavailable, project CLAUDE.md / MEMORY.md entries are still
+    listed with exists=False.
     """
     home = Path.home()
     entries: list[ConfigFileEntry] = []
 
-    # 1. 글로벌 CLAUDE.md
-    entries.append(_file_entry("글로벌 CLAUDE.md", "🌐", home / ".claude" / "CLAUDE.md"))
+    # 1. Global CLAUDE.md
+    entries.append(_file_entry("Global CLAUDE.md", "🌐", home / ".claude" / "CLAUDE.md"))
 
-    # 2. 프로젝트 CLAUDE.md (cwd 기준)
+    # 2. Project CLAUDE.md based on cwd
     if current_cwd:
         proj_claude = Path(current_cwd) / "CLAUDE.md"
-        entries.append(_file_entry("프로젝트 CLAUDE.md", "📂", proj_claude))
+        entries.append(_file_entry("Project CLAUDE.md", "📂", proj_claude))
 
-    # 3. 프로젝트 MEMORY.md + 메모리 개별 .md 들 (slug 발견)
+    # 3. Project MEMORY.md and individual memory .md files
     if current_cwd:
         try:
             slug = cwd_to_slug(current_cwd)
             mem_dir = PROJECTS_DIR / slug / "memory"
             mem_index = mem_dir / "MEMORY.md"
-            entries.append(_file_entry("프로젝트 MEMORY.md", "🧠", mem_index))
-            # 메모리 폴더 전체 (편집기로 열면 폴더로 열림 — VSCode/cursor 만)
+            entries.append(_file_entry("Project MEMORY.md", "🧠", mem_index))
+            # Whole memory folder. Opening a directory only works well in
+            # VSCode/cursor-like editors.
             entries.append(_file_entry(
-                "메모리 폴더 전체", "📁", mem_dir, is_dir=True,
+                "Whole memory folder", "📁", mem_dir, is_dir=True,
             ))
-            # 개별 .md 파일들 (MEMORY.md 제외)
+            # Individual .md files except MEMORY.md.
             if mem_dir.exists():
                 for md_path in sorted(mem_dir.glob("*.md")):
                     if md_path.name == "MEMORY.md":
@@ -214,53 +217,51 @@ def discover_config_files(current_cwd: Optional[str]) -> list[ConfigFileEntry]:
 
     # 5. system-apps.md
     entries.append(_file_entry(
-        "system-apps.md", "🖥",
-        home / ".gccslim/memory" / "system-apps.md",
+        "system-runtime-apps.md", "🖥",
+        home / ".gccslim/memory" / "\uc2dc\uc2a4\ud15c\uad6c\ub3d9\uc11c\ubc84\uc571.md",
     ))
 
     return entries
 
 
-# ─── 편집기 spawn 헬퍼 ─────────────────────────────────────────────────
+# ─── Editor spawn helper ────────────────────────────────────────────────
 def spawn_editor(path: Path) -> tuple[bool, str]:
-    """외부 편집기로 파일/폴더 열기. 반환: (성공여부, 사용자 메시지).
+    """Open a file/folder in the external editor.
 
-    ⚠️ 위 docstring [1][2][3] 사전 주의사항 모두 적용:
-      - start_new_session=True (TUI 죽어도 VSCode 살아있게)
-      - stdout/stderr=DEVNULL (TUI 화면 안 깨지게)
-      - FileNotFoundError catch (notify 로 명확히)
+    Returns (success, user_message). Applies the subprocess preconditions from
+    the module docstring: detached session, DEVNULL streams, and explicit
+    FileNotFoundError handling.
     """
     editor, reason = resolve_editor()
     if editor is None:
-        return False, f"❌ 편집기 못 찾음 — {reason}"
+        return False, f"❌ Editor not found — {reason}"
 
     if not path.exists():
-        return False, f"❌ 파일 없음: {path}"
+        return False, f"❌ File not found: {path}"
 
-    # editor 가 "code --new-window" 같이 옵션 포함이면 split
+    # Split editor commands that include options, such as "code --new-window".
     parts = editor.split() if " " in editor else [editor]
     cmd = parts + [str(path)]
 
     try:
         subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,   # ⚠️ [2] TUI 화면 보호
-            stderr=subprocess.DEVNULL,   # ⚠️ [2] TUI 화면 보호
-            stdin=subprocess.DEVNULL,    # 추가 안전장치
-            start_new_session=True,      # ⚠️ [1] TUI 죽어도 살아있게
+            stdout=subprocess.DEVNULL,   # ⚠️ [2] protect TUI screen
+            stderr=subprocess.DEVNULL,   # ⚠️ [2] protect TUI screen
+            stdin=subprocess.DEVNULL,    # extra safety guard
+            start_new_session=True,      # ⚠️ [1] keep alive after TUI exits
             close_fds=True,
         )
     except FileNotFoundError:
-        # ⚠️ [3] resolve 결과로는 PATH 에 있다고 했지만 race condition 으로
-        # 사이에 사라졌을 수 있음 — 명확히 안내.
-        return False, f"❌ 편집기 실행 실패: '{editor}' 명령 못 찾음 (resolve={reason})"
+        # ⚠️ [3] resolve previously found the command on PATH, but a race may remove it before spawn; report it clearly.
+        return False, f"❌ editor launch failed: '{editor}' command not found (resolve={reason})"
     except OSError as exc:
-        return False, f"❌ 편집기 spawn OSError: {exc} (editor={editor})"
+        return False, f"❌ editor spawn OSError: {exc} (editor={editor})"
 
-    return True, f"📝 {path.name} 을 {editor} 로 열었습니다 (저장 시 즉시 반영)"
+    return True, f"📝 Opened {path.name} with {editor} (changes apply when saved)"
 
 
-# ─── ConfigFilesScreen — 모달 ──────────────────────────────────────────
+# ─── ConfigFilesScreen — modal ──────────────────────────────────────────
 CONFIG_FILES_CSS = """
 ConfigFilesScreen {
     align: center middle;
@@ -394,20 +395,20 @@ from textual.message import Message as _Message
 
 
 class ConfigCard(Vertical):
-    """파일 카드 — Vertical container + 두 줄 Static + click handler.
+    """File card — Vertical container + two-line Static + click handler.
 
-    Button 의 single-line label 한계를 우회하기 위해 container 로 wrap.
-    클릭/Enter/Space 모두 Activated 메시지 발화.
+    Wrap in a container to avoid Button single-line label limits.
+    click/Enter/Space all emit an Activated message.
     """
 
     can_focus = True
     BINDINGS = [
-        Binding("enter", "activate", "열기", show=False),
-        Binding("space", "activate", "열기", show=False),
+        Binding("enter", "activate", "Open", show=False),
+        Binding("space", "activate", "Open", show=False),
     ]
 
     class Activated(_Message):
-        """카드 활성화 (클릭/Enter/Space) — bubble up 으로 ConfigFilesScreen 이 catch."""
+        """Activate card (click/Enter/Space) — bubbles up so ConfigFilesScreen can catch it."""
         def __init__(self, entry: "ConfigFileEntry") -> None:
             super().__init__()
             self.entry = entry
@@ -435,15 +436,15 @@ class ConfigCard(Vertical):
 
 
 class ConfigFilesScreen(ModalScreen[None]):
-    """📝 설정/메모리 파일 편집 모달.
+    """📝 Config/memory file editing modal.
 
-    클릭한 파일을 외부 편집기로 spawn. 편집기는 prefs `config_editor` →
-    $EDITOR → code → cursor → nano 순서로 자동 결정.
+    Spawn an external editor for the selected file. Editor priority is prefs `config_editor` →
+    $EDITOR → code → cursor → nano in that order.
     """
     DEFAULT_CSS = CONFIG_FILES_CSS
 
     BINDINGS = [
-        Binding("escape", "cancel", "닫기"),
+        Binding("escape", "cancel", "Close"),
         Binding("q", "cancel", show=False),
     ]
 
@@ -453,9 +454,9 @@ class ConfigFilesScreen(ModalScreen[None]):
         self.entries: list[ConfigFileEntry] = []
 
     def on_mount(self) -> None:
-        """Tree 노드 빌드 — build_tracked_tree 결과를 textual Tree 에 채움.
+        """Build Tree nodes from build_tracked_tree() and populate the textual Tree.
 
-        실패 시 풀 traceback 을 /tmp/gccfork-tree-error.log 에 기록 + notify 에 경로.
+        On failure, write the full traceback to /tmp/gccfork-tree-error.log and notify the path.
         """
         import traceback as _tb
         log_path = Path("/tmp/gccfork-tree-error.log")
@@ -465,7 +466,7 @@ class ConfigFilesScreen(ModalScreen[None]):
             self._populate_tree(tree, tracked)
             n_kids = len(tree.root.children)
             self.app.notify(
-                f"📥 트리 빌드 완료 · 카테고리 {n_kids}개  (실패 시 {log_path})",
+                f"📥 Tree build complete · {n_kids} categories  (on failure see {log_path})",
                 timeout=4,
             )
         except Exception as exc:
@@ -480,38 +481,38 @@ class ConfigFilesScreen(ModalScreen[None]):
                 pass
             try:
                 self.app.notify(
-                    f"❌ 트리 빌드 실패: {exc}\n→ 풀 traceback: {log_path}",
+                    f"❌ Tree build failed: {exc}\n→ full traceback: {log_path}",
                     severity="error", timeout=15,
                 )
             except Exception:
                 pass
 
     def _populate_tree(self, tree: Tree, tracked: dict) -> None:
-        """6 카테고리 → Tree 노드. 단순화 원칙:
-        - 카테고리 라벨 = `아이콘 NAME · 카운트` (subtitle 제거)
-        - hook 명령 → basename 만 (풀 경로는 노드 data 에 저장)
-        - 출처 (글로벌/프로젝트) = 색상으로만 구분 ([라벨] prefix 제거)
-        - 없는 settings 는 한 줄 요약으로 묶음
-        - MEMORY 개별 / reminder 는 default collapsed
+        """Six categories -> Tree nodes. Simplification rules:
+        - category label = `ICON NAME · count` (subtitle removed)
+        - hook command -> basename only (full path is stored in node data)
+        - source (Global/Project) = distinguished only by color ([label] prefix removed)
+        - missing settings are grouped in one summary line
+        - MEMORY individual files / reminders default to collapsed
 
-        각 카테고리 try/except 로 격리 — 한 카테고리 실패해도 나머지 보임.
-        모든 레이블은 markup-safe 하게 escape (`[`, `]` 가 들어간 hook 명령 방어).
+        each category is isolated with try/except — other categories still render even if one fails.
+        all labels are escaped for markup safety (protect hook commands containing `[` or `]`).
         """
         from rich.markup import escape as _esc
         root: TreeNode = tree.root
         root.expand()
 
-        # 출처 → 색상 매핑
+        # source -> color mapping
         def src_color(src: str) -> str:
-            if "프로젝트" in src:
+            if "Project" in src:
                 return "cyan"
             return "white"
 
         def safe_add(parent: TreeNode, raw: str, *, expand: bool = False, **kwargs):
-            """markup-unsafe 문자 escape 후 add. 실패 시 plain text 로 fallback.
+            """escape markup-unsafe chars before add. fallback to plain text on failure.
 
-            expand 인자는 add() 에 안 넘기고, 노드 생성 후 명시적 .expand() 호출.
-            (textual 버전마다 add() 의 expand kwarg 지원이 다름 — 명시적으로 안전.)
+            expand argument is not passed to add(); call .expand() explicitly after node creation.
+            (Textual versions differ in add(expand=...) support, so be explicit.)
             """
             try:
                 node = parent.add(raw, **kwargs)
@@ -532,11 +533,11 @@ class ConfigFilesScreen(ModalScreen[None]):
 
         def fail(name: str, exc: Exception) -> None:
             try:
-                self.app.notify(f"[{name}] 빌드 실패: {exc}", severity="error", timeout=8)
+                self.app.notify(f"[{name}] build failed: {exc}", severity="error", timeout=8)
             except Exception:
                 pass
 
-        # ── 1. SETTINGS — 존재하는 것만 보이고, 없는 건 요약 ──────
+        # ── 1. SETTINGS — show existing entries and summarize missing ones ──────
         try:
             s = tracked["settings"]
             existing = [f for f in s["files"] if f["exists"]]
@@ -552,17 +553,17 @@ class ConfigFilesScreen(ModalScreen[None]):
                     data={"kind": "file", "path": f["path"], "exists": True},
                 )
             if missing:
-                safe_leaf(n_settings, f"[dim]({len(missing)}개 없음 — 만들면 자동 인식)[/dim]")
+                safe_leaf(n_settings, f"[dim]({len(missing)} missing; recognized automatically when created)[/dim]")
         except Exception as exc:
             fail("SETTINGS", exc)
 
-        # ── 2. HOOK — basename + 색상으로 출처 구분 ──────────────
+        # ── 2. HOOK — basename plus color distinguish source ──────────────
         try:
             h = tracked["hooks_registered"]
             total_hooks = sum(len(ev["items"]) for ev in h["events"])
             n_hooks = safe_add(root, f"[b]{h['icon']} HOOK · {total_hooks}[/b]", expand=True)
             if not h["events"]:
-                safe_leaf(n_hooks, "[dim](없음)[/dim]")
+                safe_leaf(n_hooks, "[dim](none)[/dim]")
             for ev in h["events"]:
                 ev_name = _esc(ev["label"].split(" (")[0])
                 n_event = safe_add(n_hooks, f"[yellow]{ev_name}[/yellow] · {len(ev['items'])}", expand=True)
@@ -584,34 +585,34 @@ class ConfigFilesScreen(ModalScreen[None]):
                             "exists": Path(it["script_path"]).exists(),
                         })
                     else:
-                        safe_leaf(n_event, f"{leaf_label}  [dim](인라인 명령)[/dim]")
+                        safe_leaf(n_event, f"{leaf_label}  [dim](inline command)[/dim]")
         except Exception as exc:
             fail("HOOK", exc)
 
-        # ── 3. 실제 주입 증거 — 매칭된 출처별 카운트만 ─────────────
+        # ── 3. actual injection evidence — counts only by matched source ─────────────
         try:
             e = tracked["evidence"]
             from collections import Counter
             sources_counter = Counter(r["matched_source"] for r in e["reminders"] if r["matched_source"])
             unmatched_count = sum(1 for r in e["reminders"] if not r["matched_source"])
             total_r = len(e["reminders"])
-            n_ev = safe_add(root, f"[b]{e['icon']} 실제 증거 · {total_r}개 reminder[/b]", expand=True)
+            n_ev = safe_add(root, f"[b]{e['icon']} actual evidence · {total_r} reminders[/b]", expand=True)
             if e["session_jsonl"]:
                 sid_short = Path(e["session_jsonl"]).stem[:8]
                 mt = _esc(e.get("mtime_iso", "")[5:16].replace("T", " "))
                 safe_leaf(
                     n_ev,
-                    f"[dim]세션 {sid_short} · {mt}[/dim]",
+                    f"[dim]session {sid_short} · {mt}[/dim]",
                     data={"kind": "file", "path": e["session_jsonl"], "exists": True},
                 )
             for src, cnt in sorted(sources_counter.items(), key=lambda x: -x[1]):
-                safe_leaf(n_ev, f"[green]✓[/green] [magenta]{_esc(src)}[/magenta] · {cnt}회")
+                safe_leaf(n_ev, f"[green]✓[/green] [magenta]{_esc(src)}[/magenta] · {cnt} times")
             if unmatched_count:
-                safe_leaf(n_ev, f"[dim]? 미매칭 · {unmatched_count}회[/dim]")
+                safe_leaf(n_ev, f"[dim]? unmatched · {unmatched_count} times[/dim]")
             if not e["reminders"]:
-                safe_leaf(n_ev, "[dim](아직 reminder 없음)[/dim]")
+                safe_leaf(n_ev, "[dim](no reminders yet)[/dim]")
         except Exception as exc:
-            fail("실제 증거", exc)
+            fail("actual evidence", exc)
 
         # ── 4. CLAUDE.md ─────────────────────────────────────────
         try:
@@ -625,19 +626,19 @@ class ConfigFilesScreen(ModalScreen[None]):
                 })
             cm_missing = len(cm["files"]) - len(cm_existing)
             if cm_missing:
-                safe_leaf(n_cm, f"[dim]({cm_missing}개 없음)[/dim]")
+                safe_leaf(n_cm, f"[dim]({cm_missing} missing)[/dim]")
         except Exception as exc:
             fail("CLAUDE.md", exc)
 
-        # ── 5. MEMORY — collapsed default + 인덱스 + 개별 분리 ───
+        # ── 5. MEMORY — collapsed by default, with index and individual files separated ───
         try:
             m = tracked["memory"]
             m_existing = [f for f in m["files"] if f["exists"]]
-            index_files = [f for f in m_existing if "MEMORY.md" in f["label"] or "폴더" in f["label"]]
+            index_files = [f for f in m_existing if "MEMORY.md" in f["label"] or "folder" in f["label"]]
             individual = [f for f in m_existing if f not in index_files]
             n_m = safe_add(
                 root,
-                f"[b]{m['icon']} MEMORY · 인덱스 + .md {len(individual)}개[/b]",
+                f"[b]{m['icon']} MEMORY · index + {len(individual)} .md files[/b]",
                 expand=False,
             )
             for f in index_files:
@@ -645,7 +646,7 @@ class ConfigFilesScreen(ModalScreen[None]):
                     "kind": "file", "path": f["path"], "exists": True,
                 })
             if individual:
-                n_indv = safe_add(n_m, f"[dim]개별 .md ({len(individual)})[/dim]", expand=False)
+                n_indv = safe_add(n_m, f"[dim]individual .md ({len(individual)})[/dim]", expand=False)
                 for f in individual:
                     short = _esc(f["label"].replace("memory/", "").replace(".md", ""))
                     safe_leaf(n_indv, f"[white]{short}[/white]", data={
@@ -654,26 +655,26 @@ class ConfigFilesScreen(ModalScreen[None]):
         except Exception as exc:
             fail("MEMORY", exc)
 
-        # ── 6. 외부 페이로드 ─────────────────────────────────────
+        # ── 6. external payload ─────────────────────────────────────
         try:
             ex = tracked["external_payload"]
             ex_existing = [f for f in ex["files"] if f["exists"]]
-            n_ex = safe_add(root, f"[b]{ex['icon']} 외부 payload · {len(ex_existing)}[/b]", expand=True)
+            n_ex = safe_add(root, f"[b]{ex['icon']} external payload · {len(ex_existing)}[/b]", expand=True)
             for f in ex_existing:
                 safe_leaf(n_ex, f"[white]{_esc(f['label'])}[/white]", data={
                     "kind": "file", "path": f["path"], "exists": True,
                 })
             ex_missing = len(ex["files"]) - len(ex_existing)
             if ex_missing:
-                safe_leaf(n_ex, f"[dim]({ex_missing}개 없음)[/dim]")
+                safe_leaf(n_ex, f"[dim]({ex_missing} missing)[/dim]")
         except Exception as exc:
-            fail("외부 payload", exc)
+            fail("external payload", exc)
 
     def on_tree_node_selected(self, event: "Tree.NodeSelected") -> None:
-        """리프 노드 클릭 / Enter → spawn_editor.
+        """Leaf node click / Enter → spawn_editor.
 
-        모달은 자동 close 하지 않음 — 사용자가 여러 파일 연속으로 열 수 있게.
-        Esc / [취소] 누를 때만 close.
+        Modal does not close automatically — so the user can open multiple files in sequence.
+        Esc / [Cancel] closes only when pressed.
         """
         node = event.node
         data = node.data
@@ -686,33 +687,33 @@ class ConfigFilesScreen(ModalScreen[None]):
             return
         path = Path(path_str)
         if not data.get("exists") or not path.exists():
-            self.app.notify(f"파일 없음: {path}", severity="warning")
+            self.app.notify(f"File missing: {path}", severity="warning")
             return
         ok, msg = spawn_editor(path)
         sev = "information" if ok else "error"
         self.app.notify(msg, severity=sev, timeout=4)
-        # 의도적으로 dismiss 안 함 — 사용자가 다른 파일도 계속 열 수 있게
+        # intentionally do not dismiss — so the user can keep opening other files
 
     def compose(self) -> ComposeResult:
-        # 평면 카드 데이터는 더 안 씀 — Tree 위젯이 모두 보여줌
+        # flat card data is no longer used — Tree widget shows everything
         editor, reason = resolve_editor()
-        editor_label = f"편집기: {editor or '없음'}" if editor else "❌ 편집기 없음"
+        editor_label = f"Editor: {editor or 'none'}" if editor else "❌ Editor none"
 
         with Vertical(id="cfg-box"):
             with Vertical(id="cfg-header"):
-                yield Static("📥 자동 주입 — 실제 추적", id="cfg-header-title")
+                yield Static("📥 Auto injection — actual tracking", id="cfg-header-title")
                 yield Static(
-                    f"리프 노드 Enter/클릭 = VSCode 로 열기 · {reason}",
+                    f"Leaf node Enter/click opens in VSCode · {reason}",
                     id="cfg-header-meta",
                 )
-            tree: Tree = Tree("📥 Claude Code 자동 주입 (이 프로젝트)", id="cfg-tree")
+            tree: Tree = Tree("📥 Claude Code auto injection (this project)", id="cfg-tree")
             tree.show_root = True
             tree.show_guides = True
             yield tree
             with Horizontal(id="cfg-btn-row"):
-                yield Button("[취소]", id="cfg-btn-cancel")
+                yield Button("[Cancel]", id="cfg-btn-cancel")
                 yield Static("", id="cfg-spacer")
-                yield Button("🌐 고급 (브라우저)", id="cfg-btn-advanced")
+                yield Button("🌐 Advanced (browser)", id="cfg-btn-advanced")
                 yield Static("  " + editor_label)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -724,14 +725,14 @@ class ConfigFilesScreen(ModalScreen[None]):
             return
 
     def on_config_card_activated(self, event: "ConfigCard.Activated") -> None:
-        """카드 활성화 (클릭/Enter/Space) → 편집기 spawn. 모달은 안 닫힘 (연속 편집)."""
+        """Activate card (click/Enter/Space) → editor spawn. modal stays open (continuous editing)."""
         entry = event.entry
         ok, msg = spawn_editor(entry.path)
         sev = "information" if ok else "error"
         self.app.notify(msg, severity=sev, timeout=4)
 
     def _open_advanced_browser(self) -> None:
-        """🌐 고급 — 5 카테고리 트리 HTML 을 브라우저로 spawn. 모달 유지."""
+        """🌐 Advanced — spawn five-category tree HTML in browser. keep modal open."""
         try:
             tree = build_injection_tree(self.current_cwd)
             html = render_html_tree(tree)
@@ -740,21 +741,21 @@ class ConfigFilesScreen(ModalScreen[None]):
             ok, msg, _html_path = open_in_browser(html, sid_hint=sid)
             sev = "information" if ok else "error"
             self.app.notify(msg, severity=sev, timeout=5)
-            # 모달 안 닫음 — 사용자가 TUI 트리도 계속 보면서 브라우저 보기
+            # do not close modal — so the user can view the browser while keeping the TUI tree visible
         except Exception as exc:
-            self.app.notify(f"❌ 고급 브라우저 spawn 실패: {exc}", severity="error", timeout=8)
+            self.app.notify(f"❌ advanced browser spawn failed: {exc}", severity="error", timeout=8)
 
     def action_cancel(self) -> None:
         self.dismiss()
 
 
-# ─── ConfigFilesMixin — App 결합용 ─────────────────────────────────────
+# ─── ConfigFilesMixin — App integration ─────────────────────────────────────
 class ConfigFilesMixin:
-    """메인 GCCForkApp 에 다음 메서드 추가:
+    """Add these methods to main GCCForkApp:
 
-      - action_show_config_files() — Ctrl+E 또는 📝 편집 버튼 클릭 시 호출
+      - action_show_config_files() — called by Ctrl+E or the edit button
 
-    self.notify / self.push_screen / self.current_cwd 는 App 본체가 제공.
+    self.notify / self.push_screen / self.current_cwd are provided by the App body.
     """
     def action_show_config_files(self) -> None:
         try:
@@ -762,7 +763,7 @@ class ConfigFilesMixin:
             self.push_screen(ConfigFilesScreen(current_cwd=current_cwd))  # type: ignore[attr-defined]
         except Exception as exc:
             try:
-                self.notify(f"📝 편집 모달 띄우기 실패: {exc}", severity="error")  # type: ignore[attr-defined]
+                self.notify(f"📝 failed to open edit modal: {exc}", severity="error")  # type: ignore[attr-defined]
             except Exception:
                 pass
 
@@ -786,13 +787,13 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 실제 추적 — settings.json 파싱 + jsonl reminder 매칭
+# actual tracking — settings.json parsing and jsonl reminder matching
 # ═══════════════════════════════════════════════════════════════════════
 
 def parse_settings_files(current_cwd: Optional[str]) -> dict:
-    """4 settings 파일 (글로벌 + 로컬 + 프로젝트 + 프로젝트 로컬) 파싱.
+    """Parse four settings files (Global + local + Project + Project local).
 
-    각 파일의 hooks 섹션 추출 + 출처 기록. **hook 명령 실행 X — 정적 분석만.**
+    Extract each file hooks section and record the source. **hook commands are not executed; static analysis only.**
 
     Returns:
         {
@@ -804,12 +805,12 @@ def parse_settings_files(current_cwd: Optional[str]) -> dict:
     home = Path.home()
 
     candidates = [
-        (home / ".claude" / "settings.json", "글로벌"),
-        (home / ".claude" / "settings.local.json", "글로벌 로컬"),
+        (home / ".claude" / "settings.json", "Global"),
+        (home / ".claude" / "settings.local.json", "Global local"),
     ]
     if current_cwd:
-        candidates.append((Path(current_cwd) / ".claude" / "settings.json", "프로젝트"))
-        candidates.append((Path(current_cwd) / ".claude" / "settings.local.json", "프로젝트 로컬"))
+        candidates.append((Path(current_cwd) / ".claude" / "settings.json", "Project"))
+        candidates.append((Path(current_cwd) / ".claude" / "settings.local.json", "Project local"))
 
     files: list[dict] = []
     merged: dict[str, list[dict]] = {}
@@ -834,8 +835,8 @@ def parse_settings_files(current_cwd: Optional[str]) -> dict:
                     if not isinstance(items, list):
                         continue
                     for item in items:
-                        # textual settings.json 패턴: [{matcher, hooks: [{type, command}]}]
-                        # 또는 단순 패턴: [{type, command}]
+                        # Textual settings.json pattern: [{matcher, hooks: [{type, command}]}]
+                        # or simple pattern: [{type, command}]
                         if isinstance(item, dict):
                             if "hooks" in item and isinstance(item["hooks"], list):
                                 matcher = item.get("matcher", "*")
@@ -864,31 +865,31 @@ def parse_settings_files(current_cwd: Optional[str]) -> dict:
     return {"files": files, "merged_hooks": merged}
 
 
-# system-reminder 매칭에 쓸 출처 후보 — (label, source_path, content_signature)
+# source candidates used for system-reminder matching — (label, source_path, content_signature)
 def _build_source_signatures(current_cwd: Optional[str]) -> list[tuple[str, Path, str]]:
-    """매칭에 쓸 출처 후보 — 각 파일의 첫 200자 prefix 를 시그니처로."""
+    """source candidates for matching — use the first 200 chars of each file as a signature."""
     sigs: list[tuple[str, Path, str]] = []
     home = Path.home()
 
     for label, path in [
-        ("글로벌 CLAUDE.md", home / ".claude" / "CLAUDE.md"),
-        ("프로젝트 CLAUDE.md", Path(current_cwd) / "CLAUDE.md") if current_cwd else (None, None),
+        ("Global CLAUDE.md", home / ".claude" / "CLAUDE.md"),
+        ("Project CLAUDE.md", Path(current_cwd) / "CLAUDE.md") if current_cwd else (None, None),
         ("GLOBAL_MEMORY.md", home / ".gccslim/memory" / "GLOBAL_MEMORY.md"),
-        ("system-apps.md", home / ".gccslim/memory" / "system-apps.md"),
+        ("system-runtime-apps.md", home / ".gccslim/memory" / "\uc2dc\uc2a4\ud15c\uad6c\ub3d9\uc11c\ubc84\uc571.md"),
     ]:
         if label is None or path is None:
             continue
         try:
             if path.exists():
                 content = path.read_text(encoding="utf-8", errors="ignore")
-                # 의미 있는 첫 줄들 (whitespace 무시)
+                # meaningful first lines (ignoring whitespace)
                 sig = "".join(c for c in content[:300] if c.strip())[:80]
                 if sig:
                     sigs.append((label, path, sig))
         except OSError:
             pass
 
-    # MEMORY.md 별도
+    # MEMORY.md separate
     if current_cwd:
         try:
             slug = cwd_to_slug(current_cwd)
@@ -897,7 +898,7 @@ def _build_source_signatures(current_cwd: Optional[str]) -> list[tuple[str, Path
                 content = mem.read_text(encoding="utf-8", errors="ignore")
                 sig = "".join(c for c in content[:300] if c.strip())[:80]
                 if sig:
-                    sigs.append(("프로젝트 MEMORY.md", mem, sig))
+                    sigs.append(("Project MEMORY.md", mem, sig))
         except Exception:
             pass
 
@@ -906,22 +907,22 @@ def _build_source_signatures(current_cwd: Optional[str]) -> list[tuple[str, Path
 
 def extract_system_reminders(
     current_cwd: Optional[str],
-    max_bytes: int = 30_000_000,   # 30MB — 전체 read (큰 jsonl 도 SessionStart 후 모든 reminder 포함)
+    max_bytes: int = 30_000_000,   # 30MB — full read (large jsonl files still include all reminders after SessionStart)
     max_reminders: int = 50,
 ) -> dict:
-    """현재 cwd 의 슬러그 폴더에서 mtime 최신 jsonl → system-reminder 추출 + 출처 매칭.
+    """latest jsonl by mtime in the current cwd slug folder → system-reminder extraction and source matching.
 
     Returns:
         {
-          "session_jsonl": str,   # 분석한 jsonl 절대 경로
+          "session_jsonl": str,   # absolute path of analyzed jsonl
           "session_id": str,      # ca099152...
           "mtime_iso": str,
           "reminders": [{
-              "snippet": str,         # 처음 80자
-              "matched_source": str|None,  # 매칭된 파일 라벨
-              "matched_path": str|None,    # 매칭된 파일 경로
+              "snippet": str,         # first 80 chars
+              "matched_source": str|None,  # matched file label
+              "matched_path": str|None,    # matched file path
           }],
-          "total_count": int,     # 전체 reminder 수
+          "total_count": int,     # total reminder count
         }
     """
     import re as _re
@@ -969,23 +970,23 @@ def extract_system_reminders(
     except OSError:
         return result
 
-    # <system-reminder> 블록 추출 — attribute 도 허용 + 길이 제한 X
+    # <system-reminder> block extraction — allows attributes and has no length limit
     blocks = _re.findall(r"<system-reminder[^>]*>([\s\S]*?)</system-reminder>", text)
     result["total_count"] = len(blocks)
 
-    # 출처 시그니처 build
+    # build source signatures
     sigs = _build_source_signatures(current_cwd)
 
-    # 추가 휴리스틱 매칭 — 특정 키워드 → hook 출처
+    # additional heuristic matching — specific keywords → hook source
     KEYWORD_HINTS = [
         ("openboard", "openboard hook"),
         ("CLAUDE SESSION INITIALIZED", "session-init.sh hook"),
-        ("USER CONTEXT", "GLOBAL_MEMORY.md (hook 주입)"),
+        ("USER CONTEXT", "GLOBAL_MEMORY.md (hook injection)"),
         ("[SYNC]", "session-init.sh (git sync)"),
     ]
 
     seen_sigs: set[str] = set()
-    for blk in blocks[:max_reminders * 2]:  # 같은 reminder 중복 가능
+    for blk in blocks[:max_reminders * 2]:  # duplicate reminders are possible
         sig = blk.strip()[:60]
         if sig in seen_sigs:
             continue
@@ -995,17 +996,17 @@ def extract_system_reminders(
         matched_source = None
         matched_path = None
 
-        # 1. 키워드 휴리스틱 (hook 출처)
+        # 1. keyword heuristic (hook source)
         for kw, hint in KEYWORD_HINTS:
             if kw in blk:
                 matched_source = hint
                 break
 
-        # 2. 파일 시그니처 매칭
+        # 2. file signature matching
         if matched_source is None:
             blk_compact = "".join(c for c in blk[:300] if c.strip())[:80]
             for label, path, file_sig in sigs:
-                # 시그니처 prefix 매칭 (앞 30자가 일치하면)
+                # signature prefix match (when first 30 chars match)
                 if len(file_sig) >= 30 and file_sig[:30] in blk_compact:
                     matched_source = label
                     matched_path = str(path)
@@ -1023,52 +1024,52 @@ def extract_system_reminders(
 
 
 def build_tracked_tree(current_cwd: Optional[str]) -> dict:
-    """6 카테고리 통합 — settings + hooks + 실제증거 + claude_md + memory + 외부.
+    """Six-category integration: settings + hooks + evidence + claude_md + memory + external.
 
-    textual.widgets.Tree 가 그릴 수 있는 dict 트리 반환.
+    return a dict tree renderable by textual.widgets.Tree.
     """
     settings_data = parse_settings_files(current_cwd)
     reminders_data = extract_system_reminders(current_cwd)
     base_tree = build_injection_tree(current_cwd)
 
-    # 카테고리 1 — SETTINGS 파일들 (정적 분석)
+    # category 1 — SETTINGS files (static analysis)
     settings_node = {
         "key": "settings",
         "icon": "⚙",
-        "label": f"SETTINGS 파일 ({len(settings_data['files'])}개) [정적 분석]",
-        "subtitle": "hook 등록 위치. 정적 파싱 only — 실행 X.",
+        "label": f"SETTINGS files ({len(settings_data['files'])} items) [static analysis]",
+        "subtitle": "hook registration locations; static parse only, no execution",
         "files": [],
     }
     for f in settings_data["files"]:
-        suffix = f"활성 hook {f['hook_count']}개" if f["exists"] else "(없음)"
+        suffix = f"active hooks {f['hook_count']} items" if f["exists"] else "(none)"
         settings_node["files"].append({
             "label": f"{f['source_label']} — {suffix}",
-            "source_label": f["source_label"],   # _populate_tree 가 색상 매핑에 사용
+            "source_label": f["source_label"],   # used by _populate_tree for color mapping
             "path": f["path"],
             "exists": f["exists"],
             "is_dir": False,
             "size_bytes": Path(f["path"]).stat().st_size if f["exists"] else 0,
             "mtime_iso": "",
-            "when": "마스터",
+            "when": "master",
             "how": f["source_label"] + " settings",
         })
 
-    # 카테고리 2 — 등록된 HOOK (event 별)
+    # category 2 — registered HOOKs (by event)
     hooks_node = {
         "key": "hooks_registered",
         "icon": "🪝",
-        "label": "등록된 HOOK (event 별)",
-        "subtitle": "settings 파일 4개 머지 결과 — 어떤 hook 이 어느 event 에 등록됐나",
+        "label": "registered HOOKs (by event)",
+        "subtitle": "merged result of four settings files; which hook is registered to which event",
         "events": [],
     }
     for event, items in settings_data["merged_hooks"].items():
         event_node = {
-            "label": f"{event} ({len(items)}개)",
+            "label": f"{event} ({len(items)} items)",
             "items": [],
         }
         for h in items:
             cmd = h["command"][:80] + ("..." if len(h["command"]) > 80 else "")
-            # 명령 안에 .sh 경로 추출 시도 (편집 가능하게)
+            # try to extract .sh paths from commands (to make it editable)
             script_path = ""
             import re as _re2
             m = _re2.search(r"(\S+\.sh)\b", h["command"])
@@ -1083,15 +1084,15 @@ def build_tracked_tree(current_cwd: Optional[str]) -> dict:
             })
         hooks_node["events"].append(event_node)
 
-    # 카테고리 3 — 실제 주입 증거
+    # category 3 — actual injection evidence
     evidence_node = {
         "key": "evidence",
         "icon": "✅",
-        "label": "실제 주입 증거 — 최근 세션 jsonl",
+        "label": "actual injection evidence — recent session jsonl",
         "subtitle": (
-            f"세션: {reminders_data['session_id'][:8] if reminders_data['session_id'] else '(없음)'}  ·  "
+            f"session: {reminders_data['session_id'][:8] if reminders_data['session_id'] else '(none)'}  ·  "
             f"mtime: {reminders_data['mtime_iso'][:19] if reminders_data['mtime_iso'] else '?'}  ·  "
-            f"system-reminder: {reminders_data['total_count']}개"
+            f"system-reminder: {reminders_data['total_count']} items"
         ),
         "session_jsonl": reminders_data["session_jsonl"],
         "reminders": reminders_data["reminders"],
@@ -1109,14 +1110,14 @@ def build_tracked_tree(current_cwd: Optional[str]) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 고급 — 자동 주입 트리 + 개발자 친화 HTML
+# Advanced: auto-injection tree plus developer-friendly HTML
 # ═══════════════════════════════════════════════════════════════════════
 
 def build_injection_tree(current_cwd: Optional[str]) -> dict:
-    """5 카테고리로 자동 주입 항목들을 dict 트리로 반환.
+    """Return auto-injection items as a dict tree with five categories.
 
-    각 leaf 노드는: {label, path, exists, size_bytes, mtime_iso, when, how}
-    카테고리: hooks / claude_md / memory / external_payload / skills
+    Each leaf node: {label, path, exists, size_bytes, mtime_iso, when, how}
+    categories: hooks / claude_md / memory / external_payload / skills
     """
     home = Path.home()
     claude_dir = home / ".claude"
@@ -1142,19 +1143,19 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
             pass
         return node
 
-    # 1. HOOK 인프라 ⭐
+    # 1. HOOK infrastructure ⭐
     hook_files = []
     hook_files.append(file_node(
-        "settings.json (마스터 hook 정의)",
+        "settings.json (master hook definition)",
         claude_dir / "settings.json",
-        "매 세션 + 매 prompt",
-        "hook 등록 → stdout 을 컨텍스트에 주입",
+        "every session + every prompt",
+        "hook registration → inject stdout into context",
     ))
     hook_files.append(file_node(
-        "settings.local.json (로컬 override)",
+        "settings.local.json (local override)",
         claude_dir / "settings.local.json",
-        "매 세션 + 매 prompt",
-        "settings.json 위에 머지 (있으면)",
+        "every session + every prompt",
+        "settings.json merged over settings.json (if present)",
     ))
     hooks_dir = claude_dir / "hooks"
     if hooks_dir.exists():
@@ -1162,20 +1163,20 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
             hook_files.append(file_node(
                 f"hooks/{hook.name}",
                 hook,
-                "settings.json 의 trigger 따라",
-                "shell script — stdout 으로 주입",
+                "according to settings.json trigger",
+                "shell script, injected through stdout",
             ))
 
-    # 2. CLAUDE.md (자동 발견)
+    # 2. CLAUDE.md (auto-discovered)
     claude_md_files = []
     claude_md_files.append(file_node(
-        "글로벌 CLAUDE.md",
+        "Global CLAUDE.md",
         claude_dir / "CLAUDE.md",
-        "매 turn",
-        "Claude Code 가 자동 발견 + 컨텍스트 주입",
+        "every turn",
+        "Claude Code auto-discovers and injects into context",
     ))
     if current_cwd:
-        # cwd 부터 위로 traverse
+        # traverse upward from cwd
         seen = set()
         cur = Path(current_cwd).resolve()
         while True:
@@ -1184,13 +1185,13 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
                     continue
                 seen.add(cand)
                 if cand.exists():
-                    rel = "프로젝트" if cur == Path(current_cwd).resolve() else f"상위 {cur.name}"
+                    rel = "Project" if cur == Path(current_cwd).resolve() else f"parent {cur.name}"
                     sub = " (.claude/)" if ".claude" in cand.parts else ""
                     claude_md_files.append(file_node(
                         f"{rel}{sub} CLAUDE.md",
                         cand,
-                        "매 turn",
-                        "Claude Code 가 cwd → root traverse 중 발견",
+                        "every turn",
+                        "Claude Code finds it while traversing cwd -> root",
                     ))
             if cur.parent == cur:
                 break
@@ -1203,16 +1204,16 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
             slug = cwd_to_slug(current_cwd)
             mem_dir = PROJECTS_DIR / slug / "memory"
             memory_files.append(file_node(
-                "MEMORY.md (인덱스)",
+                "MEMORY.md (index)",
                 mem_dir / "MEMORY.md",
-                "매 세션 (200줄까지)",
-                "Claude Code 가 자동 로드 + 컨텍스트 inject",
+                "every session (200lines max)",
+                "Claude Code auto-loads and injects into context",
             ))
             memory_files.append(file_node(
-                "memory/ 폴더 전체",
+                "whole memory/ folder",
                 mem_dir,
                 "lazy",
-                "모델이 인덱스 보고 필요 시 직접 read",
+                "model reads the index and then reads files as needed",
             ))
             if mem_dir.exists():
                 for md in sorted(mem_dir.glob("*.md")):
@@ -1221,25 +1222,25 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
                     memory_files.append(file_node(
                         f"memory/{md.name}",
                         md,
-                        "lazy (인덱스 참조 시)",
-                        "모델이 인덱스 보고 read",
+                        "lazy (when referenced by index)",
+                        "model reads after consulting the index",
                     ))
         except Exception:
             pass
 
-    # 4. 외부 hook 페이로드
+    # 4. external hook payload
     payload_files = []
     payload_files.append(file_node(
         "GLOBAL_MEMORY.md",
         home / ".gccslim/memory" / "GLOBAL_MEMORY.md",
-        "매 세션 시작",
-        "SessionStart hook 이 cat → 컨텍스트 주입",
+        "each session start",
+        "SessionStart hook cats the file into context",
     ))
     payload_files.append(file_node(
-        "system-apps.md",
-        home / ".gccslim/memory" / "system-apps.md",
-        "참조용",
-        "CLAUDE.md 가 link, 모델이 필요 시 read",
+        "system-runtime-apps.md",
+        home / ".gccslim/memory" / "\uc2dc\uc2a4\ud15c\uad6c\ub3d9\uc11c\ubc84\uc571.md",
+        "reference only",
+        "CLAUDE.md links it; model reads when needed",
     ))
 
     # 5. SKILLS
@@ -1252,8 +1253,8 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
                 skill_files.append(file_node(
                     f"skills/{skill_dir.name}/SKILL.md",
                     skill_md,
-                    "/skill 호출 시",
-                    "사용자가 /skill 호출 → 그때 로드",
+                    "on /skill call",
+                    "user calls /skill; loaded then",
                 ))
 
     return {
@@ -1261,9 +1262,9 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
             {
                 "key": "hooks",
                 "icon": "🪝",
-                "label": "HOOK 인프라",
-                "subtitle": "자동 주입의 마스터 — 무엇이 언제 주입될지 결정",
-                "when": "매 세션 + 매 prompt",
+                "label": "HOOK infrastructure",
+                "subtitle": "master of auto injection; decides what is injected and when",
+                "when": "every session + every prompt",
                 "starred": True,
                 "files": hook_files,
             },
@@ -1271,31 +1272,31 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
                 "key": "claude_md",
                 "icon": "📄",
                 "label": "CLAUDE.md",
-                "subtitle": "Claude Code 가 cwd → root traverse 중 자동 발견",
-                "when": "매 turn 컨텍스트",
+                "subtitle": "Auto-discovered while Claude Code traverses cwd -> root",
+                "when": "every-turn context",
                 "files": claude_md_files,
             },
             {
                 "key": "memory",
                 "icon": "🧠",
                 "label": "MEMORY",
-                "subtitle": "인덱스 자동 로드 + 본문은 모델이 lazy read",
-                "when": "매 세션 (인덱스) / lazy (본문)",
+                "subtitle": "index auto-loaded; body is lazy-read by the model",
+                "when": "every session (index) / lazy (body)",
                 "files": memory_files,
             },
             {
                 "key": "external_payload",
                 "icon": "🌍",
-                "label": "외부 hook 페이로드",
-                "subtitle": "SessionStart hook 이 cat → 매 세션 주입",
-                "when": "매 세션 시작",
+                "label": "external hook payload",
+                "subtitle": "SessionStart hook cats it into every session",
+                "when": "each session start",
                 "files": payload_files,
             },
             {
                 "key": "skills",
                 "icon": "🛠",
                 "label": "SKILLS",
-                "subtitle": "/skill 호출 시 로드 (자동 주입 X)",
+                "subtitle": "loaded on /skill call (not auto-injected)",
                 "when": "on-demand",
                 "files": skill_files,
             },
@@ -1307,14 +1308,14 @@ def build_injection_tree(current_cwd: Optional[str]) -> dict:
     }
 
 
-# ── 개발자 친화 HTML 템플릿 (single file, 의존성 0) ─────────────────────
-# 다크 모노스페이스. 키보드: / = 검색, j/k = 다음/이전, Enter = vscode 열기,
-# Esc = 검색 비우기. 세부 트리는 <details>/<summary> 로 native expand/collapse.
+# ── Developer-friendly HTML template (single file, zero dependencies) ─────────────────────
+# Dark monospace. Keyboard: / = search, j/k = next/previous, Enter = VSCode Open,
+# Esc = clear search. Detail trees use native <details>/<summary> expand/collapse.
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>📥 Claude Code 자동 주입 트리</title>
+<title>📥 Claude Code auto-injection tree</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -1464,8 +1465,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 
-<h1>📥 Claude Code 자동 주입 트리</h1>
-<p class="subtitle">언제 / 어떻게 / 어디서 → 클릭으로 편집</p>
+<h1>📥 Claude Code auto-injection tree</h1>
+<p class="subtitle">when / how / where -> click to edit</p>
 
 <div class="meta-bar">
   <span><strong>cwd:</strong> __CURRENT_CWD__</span>
@@ -1475,21 +1476,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="total-bar" id="totals"></div>
 
-<input id="search" type="text" placeholder="🔍  파일명/경로 검색  (/ 단축키 · Esc 비우기)" autofocus>
+<input id="search" type="text" placeholder="🔍  search file name/path  (/ shortcut · Esc clear)" autofocus>
 
 <div id="categories"></div>
 
 <div class="help">
-  <strong>키보드</strong>:
-  <kbd>/</kbd> 검색 ·
-  <kbd>Esc</kbd> 검색 비우기 ·
-  <kbd>j</kbd>/<kbd>k</kbd> 다음/이전 ·
-  <kbd>Enter</kbd> 편집기 열기 ·
-  <kbd>g</kbd>/<kbd>G</kbd> 처음/끝
+  <strong>Keyboard</strong>:
+  <kbd>/</kbd> search ·
+  <kbd>Esc</kbd> search clear ·
+  <kbd>j</kbd>/<kbd>k</kbd> next/previous ·
+  <kbd>Enter</kbd> Editor Open ·
+  <kbd>g</kbd>/<kbd>G</kbd> first/last
   <br><br>
-  <strong>편집기</strong>: vscode:// URL 스킴 — 클릭 시 OS 가 VSCode 자동 spawn (이미 떠있으면 같은 창 새 탭).
+  <strong>Editor</strong>: vscode:// URL scheme; clicking asks the OS to open VSCode (same window/new tab if already running).
   <br>
-  <strong>📁 파일 매니저</strong>: 폴더/파일 옆 📁 버튼 = OS 기본 파일 매니저로 위치 열기 (file:// URL).
+  <strong>📁 file manager</strong>: next to folder/file 📁 button = open location in the OS default file manager (file:// URL).
 </div>
 
 <script>
@@ -1541,7 +1542,7 @@ function render() {
     if (!cat.files.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = "(없음)";
+      empty.textContent = "(none)";
       filesDiv.appendChild(empty);
     }
 
@@ -1575,11 +1576,11 @@ function render() {
         const editUrl = "vscode://file" + encodeURI(f.path);
         const fileUrl = "file://" + encodeURI(f.is_dir ? f.path : f.path.substring(0, f.path.lastIndexOf("/")));
         acts.innerHTML = `
-          <a class="btn btn-primary" href="${editUrl}" data-edit>📝 편집</a>
+          <a class="btn btn-primary" href="${editUrl}" data-edit>📝 Edit</a>
           <a class="btn" href="${fileUrl}" target="_blank">📁</a>
         `;
       } else {
-        acts.innerHTML = `<span class="btn" style="cursor:default;opacity:0.5;">없음</span>`;
+        acts.innerHTML = `<span class="btn" style="cursor:default;opacity:0.5;">none</span>`;
       }
       row.appendChild(acts);
 
@@ -1590,16 +1591,16 @@ function render() {
     root.appendChild(det);
   }
 
-  // 토탈 바
+  // total bar
   const t = document.getElementById("totals");
   t.innerHTML = `
-    <span class="stat"><strong>${totalExists}</strong> / ${totalFiles} 파일 존재</span>
-    <span class="stat">총 <strong>${fmtSize(totalSize)}</strong></span>
-    <span class="stat">${TREE.categories.length} 카테고리</span>
+    <span class="stat"><strong>${totalExists}</strong> / ${totalFiles} files exist</span>
+    <span class="stat">total <strong>${fmtSize(totalSize)}</strong></span>
+    <span class="stat">${TREE.categories.length} categories</span>
   `;
 }
 
-// 검색 — 즉시 필터
+// search — instant filter
 function applySearch(q) {
   q = (q || "").toLowerCase().trim();
   const rows = document.querySelectorAll(".file");
@@ -1620,7 +1621,7 @@ function applySearch(q) {
 const search = document.getElementById("search");
 search.addEventListener("input", e => applySearch(e.target.value));
 
-// 키보드 — vim-like
+// keyboard — vim-like
 let cursor = -1;
 function visibleRows() {
   return Array.from(document.querySelectorAll(".file")).filter(r => r.style.display !== "none");
@@ -1662,16 +1663,16 @@ render();
 
 
 def render_html_tree(tree: dict) -> str:
-    """build_injection_tree 결과를 단일 HTML 문자열로 렌더링.
+    """Render build_injection_tree result as a single HTML string.
 
-    의존성 0 — 모든 CSS/JS 가 inline. JSON 은 안전하게 escape (</script> 방어).
+    Zero dependencies: all CSS/JS is inline. JSON is safely escaped to protect </script>.
     """
     import json as _json
     from datetime import datetime as _dt
     json_str = _json.dumps(tree, ensure_ascii=False).replace("</", "<\\/")
     html = HTML_TEMPLATE
     html = html.replace("__TREE_JSON__", json_str)
-    html = html.replace("__CURRENT_CWD__", _html_escape(tree["meta"].get("current_cwd", "(없음)")))
+    html = html.replace("__CURRENT_CWD__", _html_escape(tree["meta"].get("current_cwd", "(none)")))
     html = html.replace("__HOME__", _html_escape(tree["meta"].get("home", "")))
     html = html.replace("__GENERATED__", _dt.now().strftime("%Y-%m-%d %H:%M:%S"))
     return html
@@ -1683,23 +1684,23 @@ def _html_escape(s: str) -> str:
 
 
 def open_in_browser(html_content: str, sid_hint: str = "current") -> tuple[bool, str, Optional[Path]]:
-    """HTML 을 /tmp 에 쓰고 OS 기본 브라우저로 spawn.
+    """Write HTML to /tmp and spawn the OS default browser.
 
-    같은 sid 면 덮어쓰기 → /tmp 누적 방지. /tmp 라 OS 가 부팅 시 정리.
+    Same sid overwrites the file to avoid /tmp accumulation; the OS cleans /tmp on boot.
 
-    ⚠️ subprocess 사전 주의사항 [1][2][3] 모두 적용 — spawn_editor 와 동일.
+    Applies subprocess preconditions [1][2][3], same as spawn_editor.
 
     Returns:
-        (성공여부, 사용자 메시지, html_path)
+        (success flag, user message, html_path)
     """
     sid_safe = "".join(c for c in sid_hint if c.isalnum() or c in "-_")[:32] or "current"
     html_path = Path("/tmp") / f"gccfork-tree-{sid_safe}.html"
     try:
         html_path.write_text(html_content, encoding="utf-8")
     except OSError as exc:
-        return False, f"❌ HTML 쓰기 실패: {exc}", None
+        return False, f"❌ HTML write failed: {exc}", None
 
-    # 브라우저 spawn — Linux=xdg-open, macOS=open, fallback=$BROWSER
+    # browser spawn — Linux=xdg-open, macOS=open, fallback=$BROWSER
     opener = None
     for cand in ("xdg-open", "open"):
         if shutil.which(cand):
@@ -1711,22 +1712,22 @@ def open_in_browser(html_content: str, sid_hint: str = "current") -> tuple[bool,
             opener = env_browser
     if opener is None:
         return False, (
-            f"❌ 브라우저 opener 못 찾음 (xdg-open / open / $BROWSER 모두 없음). "
-            f"수동: file://{html_path}"
+            f"❌ browser opener not found (xdg-open / open / $BROWSER all unavailable). "
+            f"manual: file://{html_path}"
         ), html_path
 
     try:
         subprocess.Popen(
             opener.split() + [str(html_path)],
-            stdout=subprocess.DEVNULL,   # ⚠️[2] TUI 화면 보호
+            stdout=subprocess.DEVNULL,   # ⚠️[2] protect TUI screen
             stderr=subprocess.DEVNULL,   # ⚠️[2]
             stdin=subprocess.DEVNULL,
-            start_new_session=True,      # ⚠️[1] TUI 죽어도 살아있게
+            start_new_session=True,      # ⚠️[1] keep alive after TUI exits
             close_fds=True,
         )
     except FileNotFoundError:
-        return False, f"❌ '{opener}' 실행 실패 (race condition)", html_path
+        return False, f"❌ '{opener}' launch failed (race condition)", html_path
     except OSError as exc:
-        return False, f"❌ 브라우저 spawn OSError: {exc}", html_path
+        return False, f"❌ browser spawn OSError: {exc}", html_path
 
-    return True, f"🌐 브라우저로 트리 열림 ({html_path.name})", html_path
+    return True, f"🌐 opened tree in browser ({html_path.name})", html_path

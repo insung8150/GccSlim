@@ -52,16 +52,16 @@ def replay(path: Path, *, include_tools: bool = True) -> int:
     try:
         fh = path.open("r", encoding="utf-8", errors="replace")
     except OSError as exc:
-        print(f"[GccSlim replay] 세션 파일을 열 수 없습니다: {exc}", file=sys.stderr)
+        print(f"[GccSlim replay] Could not open the session file: {exc}", file=sys.stderr)
         return 1
 
     brand = os.environ.get("GCCFORK_REPLAY_BRAND") or os.environ.get("GCCSLIM_REPLAY_BRAND") or "GccSlim"
     print()
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print(f"[{brand}] 하드 복제 세션 과거 대화 재생")
+    print(f"[{brand}] Replaying prior transcript for the hard-cloned session")
     print(f"[{brand}] source: {path}")
-    print(f"[{brand}] 아래 내용은 터미널 스크롤백 표시용입니다.")
-    print(f"[{brand}] 실제 LLM 컨텍스트는 이어서 실행되는 `codex resume` 이 JSONL에서 읽습니다.")
+    print(f"[{brand}] The following output is only for terminal scrollback visibility.")
+    print(f"[{brand}] The actual LLM context is still loaded by the following `codex resume` from JSONL.")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print()
 
@@ -131,8 +131,8 @@ def replay(path: Path, *, include_tools: bool = True) -> int:
                 continue
 
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print(f"[{brand}] 과거 대화 재생 완료: {seen}개 대화 블록")
-    print(f"[{brand}] 이제 Codex 세션을 재개합니다.")
+    print(f"[{brand}] Replay complete: {seen} conversation blocks")
+    print(f"[{brand}] Resuming the Codex session now.")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print()
     return 0

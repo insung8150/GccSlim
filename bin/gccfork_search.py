@@ -1,27 +1,27 @@
-"""gccfork — 🔬 깊이 본문 전체 스캔(deep search) 사이드카 모듈.
+"""gccfork — deep full-text session search sidecar.
 
-본 파일은 `gccfork.py` 의 검색 기능 일체를 분리한 것. main 에서:
+This file contains the search feature split out of `gccfork.py`. Import it from main with:
 
     from gccfork_search import DeepModeIndicator, DeepSearchMixin
 
-으로 import 하고, App 클래스에 mixin 으로 적용:
+and apply it to the App class as a mixin:
 
     class GCCForkApp(DeepSearchMixin, App):
         ...
 
-App `__init__` 끝에서 `self._init_deep_search_state()` 한 번 호출.
+Call `self._init_deep_search_state()` once at the end of App `__init__`.
 
-검색 기능 4종:
+Search modes:
   1. exact substring (lowercase)
-  2. 공백 무시 substring  ("마커검출" ↔ "마커 검출")
-  3. 토큰 AND  ("머신 러닝" → 양쪽 다 있는 라인)
-  4. fuzzy partial_ratio ≥ 80  (rapidfuzz, 영문 오타 허용)
+  2. whitespace-insensitive substring  ("markerdetect" ↔ "marker detect")
+  3. token AND  ("machine learning" -> lines containing both tokens)
+  4. fuzzy partial_ratio ≥ 80  (rapidfuzz, handles English typos)
 
-UI 효과:
-  - Knight Rider 진행 배너
-  - 매치 세션 라인 전체 옅은 빨간 bg
-  - preview 에 ±2턴(총 5턴) 발췌 + alternating bg
-  - 압축 전 turn 은 "🚨 압축전" + 빨간 bg (resume 후 LLM 미기억 경고)
+UI effects:
+  - Knight Rider progress banner
+  - matched session rows get a light red background
+  - preview shows ±2 turns (5 total) with alternating backgrounds
+  - pre-compaction turns are marked "🚨 pre-compact" with a red background (not necessarily remembered after resume)
 """
 from __future__ import annotations
 
@@ -45,10 +45,9 @@ from textual.widgets import Input, Static, TextArea
 
 
 class DeepBlockTextArea(TextArea):
-    """🔬 매치 블록 TextArea — drag-select + 우클릭 복사 메뉴 위임.
+    """🔬 Match block TextArea with drag-select and delegated right-click copy menu.
 
-    SelectableTextArea (main 의 클래스) 를 mixin 에서 직접 import 하면 순환
-    의존이 생기므로, 동일 동작을 여기에 작은 사본으로 둠.
+    Importing SelectableTextArea (the main module class) from this mixin would create a circular dependency, so this small copy keeps the same behavior locally.
     """
     ALLOW_SELECT = False
 
@@ -80,9 +79,9 @@ class DeepBlockTextArea(TextArea):
         await super()._on_mouse_up(event)
 
 
-# ─── helper — main 의 동일 함수 사본 (순환 import 회피용) ─────────────────
+# ─── helper — copy of the main helper to avoid a circular import ─────────────────
 def _extract_text_from_message(message) -> str:
-    """Claude `message.content` → 텍스트 합쳐 반환 (str | list[block])."""
+    """Return combined text from Claude `message.content` (str or list[block])."""
     if not isinstance(message, dict):
         return ""
     content = message.get("content")
@@ -102,15 +101,15 @@ def _extract_text_from_message(message) -> str:
     return ""
 
 
-# ─── 위젯 — 🔬 깊이 인디케이터 ───────────────────────────────────────────
+# ─── widget — deep-search indicator ───────────────────────────────────────────
 class DeepModeIndicator(Static, can_focus=True):
-    """🔬 깊이 인디케이터 — 클릭/Enter/Space 로 deep 모드 토글.
+    """🔬 Deep-search indicator toggled by click, Enter, or Space.
 
-    동작 흐름:
-      1. 클릭 → deep 모드 ON (붉은색 시각 변화) + 입력란 포커스
-      2. 사용자가 검색어 입력 (incremental 필터 동작 안 함)
-      3. Enter → 본문 전체 스캔 시작
-      4. 다시 클릭 → deep 모드 OFF (원래 일반 필터 복귀)
+    Flow:
+      1. click enables deep mode (red visual state) and focuses the input
+      2. user enters the query (incremental filtering does not run)
+      3. Enter starts a full-body scan
+      4. click again disables deep mode and returns to normal filtering
     """
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
@@ -137,15 +136,14 @@ class DeepModeIndicator(Static, can_focus=True):
             self.app.toggle_deep_search()
 
 
-# ─── Mixin — App 에 적용해 검색 메서드 결합 ────────────────────────────
+# ─── Mixin — attach search methods to the App ────────────────────────────
 class DeepSearchMixin:
-    """🔬 깊이 검색 — GCCForkApp 에 mixin 으로 적용.
+    """🔬 Deep search mixin for GCCForkApp.
 
-    Mixin 자체 state 는 `_init_deep_search_state()` 호출 시 초기화.
-    main 의 `__init__` 마지막에 한 번 호출하면 됨.
+    Mixin state is initialized by `_init_deep_search_state()`. Call it once at the end of main `__init__`.
     """
 
-    # State (__init__ 가 없으니 attribute 만 외부에서 설정)
+    # State (the mixin has no __init__, so attributes are set externally)
     _deep_mode: bool
     _deep_scan_done: bool
     _deep_search_query: str
@@ -153,22 +151,22 @@ class DeepSearchMixin:
     _deep_search_in_progress: bool
 
     def _init_deep_search_state(self) -> None:
-        """App `__init__` 끝에서 한 번 호출."""
+        """Call once at the end of App `__init__`."""
         self._deep_mode = False
         self._deep_scan_done = False
         self._deep_search_query = ""
         self._deep_search_results = set()
         self._deep_search_in_progress = False
-        # 블록 캐시 — (sid, query) → blocks list. 같은 세션 재선택 시 즉시 lookup.
-        # 새 스캔 / 모드 종료 시 비움.
+        # Block cache: (sid, query) -> blocks list. Re-selecting the same session can use it immediately.
+        # Cleared on a new scan or when leaving the mode.
         self._deep_blocks_cache: dict[tuple[str, str], list] = {}
 
-    # ─── 모드 토글 ───────────────────────────────────────────────────
+    # ─── mode toggle ───────────────────────────────────────────────────
     def toggle_deep_search(self) -> None:
-        """🔬 깊이 인디케이터 클릭 — 모드 ON/OFF 토글.
+        """🔬 Deep indicator click toggles the mode.
 
-        OFF→ON: 시각만 바뀜(붉은색) + 입력란 포커스. 스캔은 안함.
-        ON→OFF: 일반 필터로 복귀.
+        OFF to ON: only updates the visual state (red) and focuses the input; it does not scan yet.
+        ON to OFF: return to normal filtering.
         """
         if self._deep_search_in_progress:
             return
@@ -181,8 +179,8 @@ class DeepSearchMixin:
         self._deep_mode = True
         self._deep_scan_done = False
         self._deep_search_results = set()
-        self._deep_blocks_cache = {}  # 새 모드 진입 — 캐시 초기화
-        # 이전 스캔이 예외로 죽어 in_progress 가 stuck 상태일 수 있음 → 항상 리셋
+        self._deep_blocks_cache = {}  # entering a new mode — reset cache
+        # A previous scan may have failed and left in_progress stuck, so always reset it
         self._deep_search_in_progress = False
         try:
             inp = self.query_one("#filter-input", Input)
@@ -193,15 +191,15 @@ class DeepSearchMixin:
         except Exception:
             pass
         self.refresh_list()
-        self.notify("🔬 깊이 모드 — 검색어 입력 후 Enter 로 본문 전체 스캔")
+        self.notify("🔬 Deep mode — enter a query and press Enter to scan full session bodies")
 
     def _exit_deep_mode(self) -> None:
         self._deep_mode = False
         self._deep_scan_done = False
         self._deep_search_query = ""
         self._deep_search_results = set()
-        self._deep_blocks_cache = {}  # 모드 종료 — 캐시 비우기
-        self._deep_search_in_progress = False  # 다음 진입 시 깨끗한 상태
+        self._deep_blocks_cache = {}  # leaving mode — clear cache
+        self._deep_search_in_progress = False  # clean state for next entry
         try:
             inp = self.query_one("#filter-input", Input)
             inp.remove_class("deep-scan")
@@ -212,40 +210,40 @@ class DeepSearchMixin:
         self._hide_deep_preview()
         self.refresh_list()
 
-    # ─── Textual 이벤트 핸들러 ────────────────────────────────────────
+    # ─── Textual event handlers ────────────────────────────────────────
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """필터 입력 Enter — deep 모드일 때만 본문 스캔 시작."""
+        """Filter input Enter starts a full-body scan only in deep mode."""
         if event.input.id != "filter-input":
             return
         if not self._deep_mode:
             return
         query = event.value.strip()
         if not query:
-            self.notify("검색어를 입력한 뒤 Enter 를 누르세요.", severity="warning")
+            self.notify("Enter a query, then press Enter.", severity="warning")
             return
         if self._deep_search_in_progress:
             return
         self._start_deep_search(query)
 
-    # ─── 백그라운드 스캔 ──────────────────────────────────────────────
+    # ─── background scan ──────────────────────────────────────────────
     def _start_deep_search(self, query: str) -> None:
-        """백그라운드에서 모든 세션 jsonl 본문 다중 매칭. Knight Rider UI."""
+        """Match all session jsonl bodies in the background with multiple matchers. Knight Rider UI."""
         self._deep_search_in_progress = True
         self._deep_search_query = query
-        self._deep_blocks_cache = {}  # 새 query — 캐시 무효화
+        self._deep_blocks_cache = {}  # new query — invalidate cache
         candidates = list(self.sessions)
         n = len(candidates)
-        # 5개 노이즈 필터 prefs 스냅샷 — 워커 시작 시점 값으로 고정
+        # Snapshot the five noise-filter prefs at worker start
         from gccfork_settings import get_deep_prefs_snapshot, get_scannable_text
         prefs = get_deep_prefs_snapshot()
-        self._show_progress_banner(f"🔬 본문 전체 스캔 — {n}개 세션 / '{query}' / 다중 매처")
+        self._show_progress_banner(f"🔬 Full-body scan — {n} sessions / '{query}' / multiple matchers")
         self._start_scanner_animation()
 
         def _worker() -> None:
             matched: set[str] = set()
             prebuilt: dict = {}
             try:
-                # fuzzy 매처는 6번째 노이즈 필터 — 디폴트 OFF (false positive 큼).
+                # The fuzzy matcher is the sixth noise filter and defaults to OFF because false positives are common.
                 fuzz = None
                 if prefs.get("deep_include_fuzzy", False):
                     from rapidfuzz import fuzz as _fuzz
@@ -268,7 +266,7 @@ class DeepSearchMixin:
                             return True
                     return False
 
-                # 매치되면 그 자리에서 발췌 블록도 빌드 → 캐시에 저장.
+                # When a line matches, build the excerpt block immediately and cache it.
                 for idx, sess in enumerate(candidates, 1):
                     try:
                         p = sess.jsonl_path
@@ -276,9 +274,7 @@ class DeepSearchMixin:
                             continue
                         with p.open("r", encoding="utf-8", errors="ignore") as fh:
                             for raw in fh:
-                                # 5개 노이즈 필터 적용 — get_scannable_text 가 ''
-                                # 반환하면 그 라인은 skip (attachment/file-history/
-                                # tool_result/tool_use/system 등 카테고리 OFF 시).
+                                # Apply the five noise filters. If get_scannable_text returns an empty string, skip that line (for disabled attachment/file-history/tool_result/tool_use/system categories).
                                 try:
                                     obj = json.loads(raw)
                                 except json.JSONDecodeError:
@@ -302,23 +298,23 @@ class DeepSearchMixin:
                         try:
                             self.call_from_thread(
                                 self._update_stream_text,
-                                f"  진행 {idx}/{n}  ·  매치 {len(matched)}개  (다중 매처)",
+                                f"  progress {idx}/{n}  ·  matches {len(matched)}  (multiple matchers)",
                             )
                         except Exception:
                             pass
             except Exception as exc:
-                # rapidfuzz import 실패 등 워커 전체 예외도 finally 에서 종료 통보
+                # Even whole-worker failures such as rapidfuzz import errors notify completion in finally
                 try:
                     self.call_from_thread(
                         self.notify,
-                        f"🔬 스캔 오류: {type(exc).__name__}: {exc}",
+                        f"🔬 Scan error: {type(exc).__name__}: {exc}",
                         severity="error",
                     )
                 except Exception:
                     pass
             finally:
-                # 항상 _finish_deep_search 호출 → in_progress 플래그 해제 + 리스트 갱신.
-                # 예외로 matched 가 비어도 scan_done=True 로 마쳐 사용자가 재시도 가능.
+                # Always call _finish_deep_search to clear in_progress and refresh the list.
+                # Even when an exception leaves matched empty, finish with scan_done=True so the user can retry.
                 try:
                     self.call_from_thread(self._finish_deep_search, query, matched, prebuilt)
                 except Exception:
@@ -336,19 +332,19 @@ class DeepSearchMixin:
         self._deep_scan_done = True
         if prebuilt:
             self._deep_blocks_cache.update(prebuilt)
-        self.notify(f"🔬 본문 스캔 완료 — {len(matched)}개 매치", timeout=4)
+        self.notify(f"🔬 Full-body scan complete — {len(matched)} matches", timeout=4)
         self.refresh_list()
 
-    # ─── 발췌 추출 + preview 하이라이트 ───────────────────────────────
+    # ─── excerpt extraction and preview highlighting ───────────────────────────────
     def _extract_deep_match_snippet(
         self, session, query: str, max_hits: int = 6,
     ) -> tuple[str, list[tuple[int, int, bool]]]:
-        """매치된 turn 의 ±2턴(총 5턴) 발췌 블록.
+        """Excerpt block for ±2 turns around a matched turn (5 total).
 
-        반환: (전체 텍스트, [(start_row, end_row, is_pre_compact), ...])
+        Return: (full text, [(start_row, end_row, is_pre_compact), ...])
 
-        매치 정책: 워커와 동일한 다중 매처.
-        압축 경계: jsonl 의 마지막 isCompactSummary 이전 turn = pre-compact.
+        Match policy is the same multi-matcher used by the worker.
+        Compaction boundary: turns before the last isCompactSummary in the jsonl are pre-compact.
         """
         if not query or not session.jsonl_path.exists():
             return "", []
@@ -382,7 +378,7 @@ class DeepSearchMixin:
                         obj = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    # 5개 노이즈 필터 — scannable=='' 면 매치 후보 아님
+                    # Five noise filters: scannable == empty means this is not a match candidate
                     scannable = get_scannable_text(obj, prefs)
                     line_has_match = line_matches(scannable) if scannable else False
                     if obj.get("isCompactSummary") is True:
@@ -412,7 +408,7 @@ class DeepSearchMixin:
             return "", []
         match_turns = match_turns[:max_hits]
 
-        # ±2턴 윈도우(총 5턴) 만들고 겹치는 것 병합
+        # Build ±2-turn windows (5 total) and merge overlaps
         windows: list[tuple[int, int, int]] = []
         for mi in match_turns:
             lo = max(0, mi - 2)
@@ -423,7 +419,7 @@ class DeepSearchMixin:
             else:
                 windows.append((lo, hi, mi))
 
-        # 렌더 — 줄바꿈 보존, 메시지당 6줄 / 500자 cap, PAD_WIDTH 200 cell
+        # Render with preserved newlines, 6 lines / 500 chars per message, PAD_WIDTH 200 cells
         lines: list[str] = []
         block_meta: list[tuple[int, int, bool]] = []
         type_marks = {"user": "🧑", "assistant": "🤖"}
@@ -439,7 +435,7 @@ class DeepSearchMixin:
 
         for bi, (lo, hi, primary_mi) in enumerate(windows, 1):
             is_pre = (last_compact_turn_idx >= 0 and primary_mi <= last_compact_turn_idx)
-            header = f"─── 매치 #{bi}/{len(windows)} (turn {primary_mi+1}{' · 🚨 압축전' if is_pre else ''}) ─────"
+            header = f"─── match #{bi}/{len(windows)} (turn {primary_mi+1}{' · 🚨 pre-compact' if is_pre else ''}) ─────"
             block_start = len(lines)
             lines.append(pad(header))
             for ti in range(lo, hi + 1):
@@ -459,7 +455,7 @@ class DeepSearchMixin:
                         prefix = label if i == 0 else indent
                         lines.append(pad(prefix + ml.rstrip()))
                     if omitted > 0:
-                        lines.append(pad(f"{indent}… ({omitted}줄 더)"))
+                        lines.append(pad(f"{indent}… ({omitted}more lines)"))
                     marker = " "
             lines.append(pad(""))
             block_end = len(lines) - 1
@@ -469,7 +465,7 @@ class DeepSearchMixin:
         return "\n".join(lines), block_meta
 
     def _apply_deep_snippet_highlight(self, preview: TextArea, text: str, query: str) -> None:
-        """preview 안의 발췌 블록에서 검색어 substring 하이라이트."""
+        """Highlight query substrings inside preview excerpt blocks."""
         if not query:
             return
         try:
@@ -497,7 +493,7 @@ class DeepSearchMixin:
             in_block = False
             highlights = preview._highlights or defaultdict(list)
             for row, line in enumerate(lines):
-                if "🔬 본문 매치 발췌" in line:
+                if "🔬 body match excerpt" in line:
                     in_block = True
                     continue
                 if in_block and line.startswith("───"):
@@ -521,12 +517,12 @@ class DeepSearchMixin:
         except Exception:
             pass
 
-    # ─── Option D 렌더 — DeepBlockTextArea per-block (drag-select 지원) ──
+    # ─── Option D render — one DeepBlockTextArea per block (supports drag-select) ──
     def _render_deep_preview(self, session, query: str) -> bool:
-        """deep-preview VerticalScroll 안에 블록당 DeepBlockTextArea mount.
+        """Mount one DeepBlockTextArea per block inside deep-preview VerticalScroll.
 
-        캐시 hit → 즉시 mount, miss → 빌드 후 캐시 저장.
-        반환: True = 렌더 성공 (매치 있어서 보여줌), False = 매치 없음.
+        Cache hit mounts immediately; cache miss builds and stores the result.
+        Return True when rendering succeeded with matches; False when there are no matches.
         """
         try:
             container = self.query_one("#deep-preview", VerticalScroll)
@@ -534,7 +530,7 @@ class DeepSearchMixin:
         except Exception:
             return False
 
-        # 캐시 우선 — (sid, query) 같은 조합이면 빌드 생략 (jsonl 재파싱 X)
+        # Prefer the cache. The same (sid, query) skips rebuilds and jsonl reparsing.
         cache_key = (session.id, query)
         blocks = self._deep_blocks_cache.get(cache_key)
         if blocks is None:
@@ -551,7 +547,7 @@ class DeepSearchMixin:
         except Exception:
             pass
 
-        # 검색어 하이라이트용 theme — 한 번만 만들고 모든 블록 위젯에 공유
+        # Query highlight theme: create once and share across all block widgets
         match_theme = self._make_deep_block_theme()
 
         for block in blocks:
@@ -581,7 +577,7 @@ class DeepSearchMixin:
         return True
 
     def _make_deep_block_theme(self):
-        """블록 위젯에 등록할 검색어 하이라이트 theme."""
+        """TextArea theme used to highlight query hits in block widgets."""
         try:
             app_theme = self.current_theme
             surface = Color.parse(app_theme.surface or app_theme.background or "#202020")
@@ -602,13 +598,13 @@ class DeepSearchMixin:
             return None
 
     def _hide_deep_preview(self) -> None:
-        """deep-preview 숨기고 일반 preview 다시 보이게.
+        """Hide deep-preview and show the normal preview again.
 
-        매 update_preview 마다 호출되므로 — 이미 숨겨진 상태면 즉시 return.
+        This is called on every update_preview, so return immediately when already hidden.
         """
         try:
             container = self.query_one("#deep-preview", VerticalScroll)
-            # 이미 숨김 + 자식 0 = 노op (일반 모드 selection 변경의 흔한 케이스)
+            # Already hidden with no children is a no-op, common during normal-mode selection changes
             if container.styles.display == "none" and not container.children:
                 return
             normal = self.query_one("#preview-text")
@@ -622,13 +618,13 @@ class DeepSearchMixin:
     def _build_deep_match_blocks(
         self, session, query: str, max_hits: int = 6,
     ) -> list[dict]:
-        """매치된 turn 의 ±2턴 발췌를 블록 리스트로 반환.
+        """Return excerpt blocks for ±2 turns around each matched turn.
 
-        각 블록 dict:
-          - "text": 평문 (header + body 라인들) — TextArea 가 그대로 load_text
+        Each block dict:
+          - "text": plain text (header + body lines), loaded directly by TextArea
           - "highlights": defaultdict(row → [(start_byte, end_byte, "deep-search-match")])
-          - "is_pre": bool (압축전 여부 — CSS 빨간 bg + border)
-          - "dim": bool (alternating bg 의 "흐린" 차례)
+          - "is_pre": bool (whether this is pre-compact; CSS red background and border)
+          - "dim": bool (the dim phase of alternating backgrounds)
         """
         if not query or not session.jsonl_path.exists():
             return []
@@ -661,7 +657,7 @@ class DeepSearchMixin:
                         obj = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    # 5개 노이즈 필터 — 워커와 동일
+                    # Five noise filters, same as the worker
                     scannable = get_scannable_text(obj, prefs)
                     line_has_match = line_matches(scannable) if scannable else False
                     if obj.get("isCompactSummary") is True:
@@ -710,8 +706,8 @@ class DeepSearchMixin:
         for bi, (lo, hi, primary_mi) in enumerate(windows, 1):
             is_pre = (last_compact_turn_idx >= 0 and primary_mi <= last_compact_turn_idx)
             header_text = (
-                f"━━ 매치 #{bi}/{len(windows)} · turn {primary_mi+1}"
-                + (" · 🚨 압축전 (resume 후 AI 미기억)" if is_pre else "")
+                f"━━ match #{bi}/{len(windows)} · turn {primary_mi+1}"
+                + (" · 🚨 pre-compact (not remembered by AI after resume)" if is_pre else "")
                 + " ━━"
             )
             text_lines: list[str] = [header_text]
@@ -732,11 +728,11 @@ class DeepSearchMixin:
                         prefix = label if i == 0 else indent
                         text_lines.append(prefix + ml.rstrip())
                     if omitted > 0:
-                        text_lines.append(f"{indent}… ({omitted}줄 더)")
+                        text_lines.append(f"{indent}… ({omitted}more lines)")
                     marker = "  "
             full_text = "\n".join(text_lines)
 
-            # 검색어 substring 위치를 byte range 로 매핑 (TextArea highlights 형식)
+            # Map query substring positions to byte ranges (TextArea highlight format)
             highlights: defaultdict = defaultdict(list)
             for row, line in enumerate(text_lines):
                 line_lower = line.lower()
@@ -761,7 +757,7 @@ class DeepSearchMixin:
     def _apply_deep_block_bg(
         self, preview: TextArea, text: str, block_meta: list[tuple[int, int, bool]],
     ) -> None:
-        """발췌 블록마다 alternating bg + 압축전 블록은 빨간 bg."""
+        """Each excerpt block gets alternating backgrounds; pre-compact blocks get a red background."""
         if not block_meta:
             return
         try:

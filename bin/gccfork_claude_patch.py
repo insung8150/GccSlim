@@ -292,5 +292,5 @@ def format_report(report: PatchReport) -> str:
     else:
         lines.append("running Claude: none detected")
     if report.restart_required:
-        lines.append("알림: Claude Code를 재시작하면 hidden slim-and-reload가 활성화됩니다.")
+        lines.append("Notice: restart Claude Code to activate hidden slim-and-reload.")
     return "\n".join(lines)

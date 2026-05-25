@@ -1,23 +1,23 @@
-"""Pairwise fold-merge — 분기 체인을 하나의 통합 jsonl 로.
+"""Pairwise fold-merge — combine a branch chain into one integrated JSONL.
 
-기존 `gccfork_merge.py` (True Merge / 새 세션 N) 의 내부 stitching 을
-이 모듈의 fold-merge 알고리즘으로 대치 (5가지 mode 모두 지원).
-순수 library — Textual 의존 없음.
+This module replaces the internal stitching used by `gccfork_merge.py`
+(True Merge / N new sessions) with a fold-merge algorithm. All five modes are
+supported. Pure library code; no Textual dependency.
 
-설계 (사용자 합의안):
-    1. 원본 그대로 (슬림 X) pairwise merge — root → leaf 순차 fold
-    2. 디스크 사용량 무관 (중간 파일 보존, 검증 후 일괄 정리)
-    3. 마지막 1번만 슬림 (선택)
+Design:
+    1. Pairwise merge original JSONL files without slimming — fold root → leaf.
+    2. Disk usage is secondary; keep intermediate files until verification.
+    3. Optionally slim only once at the end.
 
-알고리즘 (merge_two_jsonls):
-    - 두 jsonl 의 모든 메시지를 uuid 로 dedup
-    - 같은 uuid 충돌 시 더 긴 content 보존 (슬림 stub 보다 원본 우선)
-    - timestamp 순 정렬 (interleave)
-    - sessionId 만 새 sid 로 rewrite (uuid/parentUuid chain 그대로 보존)
+Algorithm (merge_two_jsonls):
+    - Deduplicate all messages from both JSONLs by uuid.
+    - On same-uuid collisions, keep the longer content (original beats slim stubs).
+    - Sort by timestamp (interleave).
+    - Rewrite only sessionId to the new sid, preserving uuid/parentUuid chains.
 
-검증:
-    - source 모든 uuid 의 합집합 == 결과 uuid (완전 포괄성)
-    - 누락 / 중복 0 보장
+Verification:
+    - Union of all source UUIDs equals result UUIDs.
+    - Guarantees zero missing / duplicate UUIDs.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 
-# ─── 데이터 ───────────────────────────────────────────
+# ─── Data ─────────────────────────────────────────────
 @dataclass
 class MergeStepReport:
     step: int
@@ -56,7 +56,7 @@ class MergeChainReport:
     duration_sec: float = 0.0
 
 
-# ─── 유틸 ─────────────────────────────────────────────
+# ─── Utilities ────────────────────────────────────────
 def _projects_root() -> Path:
     return Path.home() / ".claude" / "projects"
 
@@ -65,10 +65,11 @@ _SKIP_TOKENS = (".bak.", ".archived", ".emergency", ".restore", ".rollback", ".c
 
 
 def find_jsonl_for_sid(sid_prefix: str) -> Optional[Path]:
-    """sid (또는 prefix) → 활성 jsonl 경로.
+    """Resolve a sid or prefix to an active JSONL path.
 
-    .bak / .archived / .emergency / .restore / .rollback / .clean-tail / .tmp 제외.
-    여러 cwd 폴더에 있으면 가장 최근 mtime 우선 (현재 작업 추정).
+    Excludes .bak / .archived / .emergency / .restore / .rollback /
+    .clean-tail / .tmp. If the sid appears in multiple cwd folders, prefer the
+    newest mtime as the likely current workspace.
     """
     root = _projects_root()
     if not root.is_dir():
@@ -90,7 +91,7 @@ def find_jsonl_for_sid(sid_prefix: str) -> Optional[Path]:
 
 
 def _content_text_len(msg: dict) -> int:
-    """메시지의 텍스트 길이 — 충돌 시 더 긴 쪽 우선용."""
+    """Return message text length for longer-content collision resolution."""
     m = msg.get("message", {}) or {}
     c = m.get("content", "")
     if isinstance(c, str):
@@ -119,7 +120,7 @@ def _content_text_len(msg: dict) -> int:
 
 
 def collect_messages(path: Path) -> dict[str, dict]:
-    """uuid → 전체 message dict. uuid 없는 라인은 스킵."""
+    """Return uuid → full message dict, skipping rows without uuid."""
     out: dict[str, dict] = {}
     if not path.exists():
         return out
@@ -135,16 +136,16 @@ def collect_messages(path: Path) -> dict[str, dict]:
     return out
 
 
-# ─── 핵심 — 두 jsonl 병합 ─────────────────────────────
+# ─── Core — merge two JSONLs ──────────────────────────
 def merge_two_jsonls(
     base_path: Path,
     next_path: Path,
     output_path: Path,
     new_sid: str,
 ) -> MergeStepReport:
-    """A + B → C — uuid dedup + timestamp 정렬 + sessionId rewrite.
+    """A + B → C with uuid dedup, timestamp sorting, and sessionId rewrite.
 
-    충돌 시 더 긴 content 보존 (슬림 stub 보다 원본 우선).
+    On collisions, keep longer content (original beats slim stubs).
     """
     base = collect_messages(base_path)
     nxt = collect_messages(next_path)
@@ -183,16 +184,16 @@ def merge_two_jsonls(
     )
 
 
-# ─── Fold — root → leaf 순차 ─────────────────────────
+# ─── Fold — root → leaf order ─────────────────────────
 def fold_merge_chain(
     chain_sids_root_to_leaf: list[str],
     output_dir: Path,
     new_sid: Optional[str] = None,
     keep_intermediate: bool = True,
 ) -> MergeChainReport:
-    """체인을 root → leaf 순서로 pairwise fold."""
+    """Pairwise-fold the chain in root → leaf order."""
     if len(chain_sids_root_to_leaf) < 2:
-        raise ValueError("chain 은 최소 2개 sid 필요")
+        raise ValueError("chain requires at least two sids")
 
     new_sid = new_sid or str(_uuid.uuid4())
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,13 +204,13 @@ def fold_merge_chain(
 
     base_path = find_jsonl_for_sid(chain_sids_root_to_leaf[0][:8])
     if base_path is None:
-        raise FileNotFoundError(f"root sid 못 찾음: {chain_sids_root_to_leaf[0]}")
+        raise FileNotFoundError(f"root sid not found: {chain_sids_root_to_leaf[0]}")
 
     accumulator = base_path
     for i, sid in enumerate(chain_sids_root_to_leaf[1:], start=1):
         next_path = find_jsonl_for_sid(sid[:8])
         if next_path is None:
-            raise FileNotFoundError(f"체인 중간 sid 못 찾음: {sid}")
+            raise FileNotFoundError(f"chain sid not found: {sid}")
         out = output_dir / f"merge-step-{i:02d}-{sid[:8]}.jsonl"
         rep = merge_two_jsonls(accumulator, next_path, out, new_sid)
         rep.step = i
@@ -244,7 +245,7 @@ def fold_merge_chain(
     )
 
 
-# ─── 진단/검증 ────────────────────────────────────────
+# ─── Diagnostics / verification ───────────────────────
 def verify_merge(report: MergeChainReport) -> dict:
     expected = report.sources_total_uuids
     actual = report.total_uuids
@@ -259,9 +260,9 @@ def verify_merge(report: MergeChainReport) -> dict:
     }
 
 
-# ─── 5가지 stitching mode (fold 기반 재구현) ─────────
+# ─── Five stitching modes (fold-based implementation) ─
 def _last_anchor_uuid(msgs: list[dict]) -> Optional[str]:
-    """metadata 메시지 (uuid=None) 는 skip — 진짜 chain anchor 만 반환."""
+    """Skip metadata messages (uuid=None) and return the real chain anchor."""
     for m in reversed(msgs):
         u = m.get("uuid")
         if u:
@@ -270,7 +271,7 @@ def _last_anchor_uuid(msgs: list[dict]) -> Optional[str]:
 
 
 def _replace_sid_inline(msg: dict, new_sid: str) -> dict:
-    """sessionId 만 교체 — 원본 dict 변형."""
+    """Replace only sessionId, mutating the original dict."""
     msg["sessionId"] = new_sid
     return msg
 
@@ -281,7 +282,7 @@ def _origin_prefix(orig_sid: str, ts: str) -> str:
 
 
 def _inject_origin_prefix(msg: dict, orig_sid: str) -> dict:
-    """user/assistant 본문 첫 텍스트 블록에 출신 prefix 주입."""
+    """Inject an origin prefix into the first user/assistant text block."""
     m = msg.get("message", {})
     if not isinstance(m, dict):
         return msg
@@ -304,13 +305,14 @@ def _inject_origin_prefix(msg: dict, orig_sid: str) -> dict:
 def split_common_and_unique(
     sources_in_order: list[Path],
 ) -> tuple[list[dict], dict[Path, list[dict]]]:
-    """fold-merge 방식의 LCA 대체 — uuid 교집합/차집합 기반.
+    """Fold-merge LCA replacement based on UUID intersection/difference.
 
-    common      = 모든 source 가 공통으로 가진 uuid 의 메시지 (intersection)
-    unique_by_path = 각 uuid 를 정확히 1번만 할당 (첫 등장 source 우선)
-                     → union = common + sum(unique) 정확히 source uuid 합집합과 일치
+    common = messages whose UUID exists in every source.
+    unique_by_path = assign each UUID exactly once, preferring first source
+                     appearance. common + sum(unique) exactly equals the source
+                     UUID union.
 
-    충돌 시 더 긴 content (슬림 stub 보다 원본) 보존.
+    On collisions, keep longer content (original beats slim stubs).
     """
     sets: list[set[str]] = []
     msg_maps: list[dict[str, dict]] = []
@@ -321,19 +323,19 @@ def split_common_and_unique(
 
     common_uuids = set.intersection(*sets) if sets else set()
 
-    # common: 충돌 시 더 긴 본문 우선
+    # common: prefer longer body on collisions.
     common_msgs: list[dict] = []
     for u in sorted(common_uuids, key=lambda u: msg_maps[0][u].get("timestamp", "")):
         candidates = [mm[u] for mm in msg_maps if u in mm]
         best = max(candidates, key=_content_text_len)
         common_msgs.append(json.loads(json.dumps(best)))
 
-    # unique: 한 uuid 는 첫 등장 source 에만 배정 (dedup)
+    # unique: assign each UUID only to the first source where it appears.
     seen_unique: set[str] = set()
     unique_by_path: dict[Path, list[dict]] = {}
     for p, mm in zip(sources_in_order, msg_maps):
         own_uuids = set(mm.keys()) - common_uuids - seen_unique
-        # 같은 uuid 가 다음 source 에도 있으면 그것의 더 긴 본문 우선
+        # If the same UUID appears in later sources, prefer the longer body.
         chosen: list[dict] = []
         for u in sorted(own_uuids, key=lambda u: mm[u].get("timestamp", "")):
             candidates = [later_mm[u] for later_mm in msg_maps if u in later_mm]
@@ -350,7 +352,7 @@ def stitch_linear(
     unique_by_path: dict[Path, list[dict]],
     new_sid: str,
 ) -> list[dict]:
-    """common + 각 source 고유를 순서대로 chain (parentUuid 재연결)."""
+    """Chain common + each source's unique rows in order, reconnecting parentUuid."""
     out = [_replace_sid_inline(m, new_sid) for m in common]
     last_uuid = _last_anchor_uuid(common)
     for path, unique in unique_by_path.items():
@@ -370,7 +372,7 @@ def stitch_interleave(
     unique_by_path: dict[Path, list[dict]],
     new_sid: str,
 ) -> list[dict]:
-    """common + 모든 고유 메시지를 timestamp 정렬 + origin prefix 주입."""
+    """Sort common + all unique messages by timestamp and inject origin prefixes."""
     out = [_replace_sid_inline(m, new_sid) for m in common]
     flat: list[tuple[str, dict]] = []
     for path, unique in unique_by_path.items():
@@ -395,7 +397,7 @@ def stitch_parallel(
     unique_by_path: dict[Path, list[dict]],
     new_sid: str,
 ) -> list[dict]:
-    """common + 각 source 고유를 원본 parentUuid 유지 (분기 그대로)."""
+    """common + each source's unique rows while preserving original parentUuid."""
     out = [_replace_sid_inline(m, new_sid) for m in common]
     for path, unique in unique_by_path.items():
         for msg in unique:
@@ -408,7 +410,7 @@ def stitch_common_only(
     unique_by_path: dict[Path, list[dict]],
     new_sid: str,
 ) -> list[dict]:
-    """공통 prefix 만 (고유 부분 모두 drop)."""
+    """Keep only the common prefix and drop all unique parts."""
     return [_replace_sid_inline(m, new_sid) for m in common]
 
 
@@ -417,7 +419,7 @@ def stitch_as_sections(
     unique_by_path: dict[Path, list[dict]],
     new_sid: str,
 ) -> list[dict]:
-    """common + 섹션 구분자 (synthetic system message) + 각 source 고유."""
+    """common + section dividers (synthetic system messages) + source uniques."""
     out = [_replace_sid_inline(m, new_sid) for m in common]
     last_uuid = _last_anchor_uuid(common)
     for path, unique in unique_by_path.items():
@@ -430,7 +432,7 @@ def stitch_as_sections(
             "parentUuid": last_uuid,
             "sessionId": new_sid,
             "type": "system",
-            "message": {"role": "system", "content": f"──── 분기 {sid_label} ────"},
+            "message": {"role": "system", "content": f"──── branch {sid_label} ────"},
             "timestamp": unique[0].get("timestamp", ""),
             "isMergeDivider": True,
         }
@@ -461,7 +463,7 @@ def merge_with_mode(
     new_sid: str,
     mode: str = "interleave",
 ) -> dict:
-    """5가지 mode 중 하나로 stitching → output jsonl 작성.
+    """Stitch with one of the five modes and write the output JSONL.
 
     Returns: {"mode", "kept", "common", "unique_total", "out_path"}
     """
@@ -486,21 +488,21 @@ def merge_with_mode(
 
 def format_report(report: MergeChainReport) -> str:
     lines = [
-        f"🔱 Merge fold 완료 ({report.duration_sec * 1000:.0f}ms)",
-        f"  체인: {len(report.chain_sids)}개 sid (root → leaf)",
+        f"🔱 Merge fold complete ({report.duration_sec * 1000:.0f}ms)",
+        f"  chain: {len(report.chain_sids)} sids (root → leaf)",
         f"  new sid: {report.new_sid}",
-        f"  결과: {report.final_path}",
-        f"  중간 파일: {len(report.intermediate_paths)}개",
+        f"  result: {report.final_path}",
+        f"  intermediate files: {len(report.intermediate_paths)}",
         "",
-        "  단계별:",
+        "  steps:",
     ]
     for s in report.steps:
         lines.append(
             f"    [{s.step:02d}] {s.base_label} ({s.base_uuids}) + "
-            f"{s.next_label} ({s.next_uuids}) → {s.union} (공통 {s.common})"
+            f"{s.next_label} ({s.next_uuids}) → {s.union} (common {s.common})"
         )
     v = verify_merge(report)
     lines.append("")
-    status = "✅ 완전 포괄" if v["ok"] else f"❌ {v['missing']} 누락 / {v['extra']} 추가"
-    lines.append(f"  검증: source {v['expected_uuids']} uuid → 결과 {v['actual_uuids']} uuid  {status}")
+    status = "✅ full coverage" if v["ok"] else f"❌ {v['missing']} missing / {v['extra']} extra"
+    lines.append(f"  verification: source {v['expected_uuids']} uuid → result {v['actual_uuids']} uuid  {status}")
     return "\n".join(lines)

@@ -1,24 +1,21 @@
-"""gccfork_unfold — 🪚 해제 (segmented compression) 사이드카 모듈.
+"""gccfork_unfold — segmented compression sidecar.
 
-Claude Code 의 auto-compact 마커 (isCompactSummary / "Compacted from") 를
-segment boundary 로 사용해 각 segment 를 독립적으로 풀 슬림. 마지막
-segment 만 keep-recent 보호 (현재 작업 영역).
+Use Claude Code auto-compact markers (isCompactSummary or "Compacted from") as segment boundaries and slim each segment independently. Only the final segment receives keep-recent protection because it represents the active working area.
 
-배경 (2026-05-04 ca09 실험으로 검증):
-  - 단순 슬림 1번 :  21.9 MB → 20.5 MB  (-6.3%)
-  - 🪚 해제      :  21.9 MB →  5.27 MB (-75.9%)
-  - **12배 효율적**
+Background (verified by the 2026-05-04 ca09 experiment):
+  - one regular slim pass :  21.9 MB → 20.5 MB  (-6.3%)
+  - segmented unfold      :  21.9 MB →  5.27 MB (-75.9%)
+  - **12x more efficient**
 
-이유: 옛 segment 는 keep-recent 보호 영역이 0 이라 strong slim 의
-진짜 위력이 발휘됨. 가장 자주 발생하는 큰 tool_result 들이 모두 drop.
+Reason: old segments have no keep-recent protected area, so strong slim can apply fully. The largest repeated tool_result entries are dropped.
 
-원칙:
-  P1. **활성 세션 거부** — 현재 PID 가 쓰고 있으면 ActiveSessionUnfoldError
-  P2. **백업 자동** — `.bak.<ts>.unfold.jsonl` 으로 슬림 직전 상태 보존
-  P3. **boundary 보존** — compact marker 라인 자체는 KEEP (검증 가능)
-  P4. **마지막 segment 보호** — keep_recent_turns 옵션으로 작업 영역 안전
-  P5. **idempotent** — 압축 0개면 no-op (안내 후 종료)
-  P6. **atomic** — tmp → os.replace, 실패 시 백업으로 롤백
+Principles:
+  P1. **Reject active sessions** — raise ActiveSessionUnfoldError when a live PID owns the session
+  P2. **Automatic backup** — `.bak.<ts>.unfold.jsonl` preserves the pre-slim state
+  P3. **Preserve boundaries** — keep the compact marker lines themselves for verification
+  P4. **Protect the last segment** — use keep_recent_turns to protect the active work area
+  P5. **idempotent** — no-op when there are no compactions (notify and exit)
+  P6. **atomic** — tmp -> os.replace, rollback from backup on failure
 """
 from __future__ import annotations
 
@@ -28,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 # Textual imports — required by UnfoldConfirmScreen (modal class) below.
-# Re-introduced 2026-05-07 after the `🪚 해제` button raised NameError on
+# Re-introduced 2026-05-07 after the `Segmented Unfold` button raised NameError on
 # ModalScreen at module import time. The Phase E (2026-05-06) Python-archive
 # pass had moved the algorithm body out of this file and inadvertently took
 # these imports with it; the modal class itself stayed and still needs them.
@@ -43,30 +40,30 @@ from gccfork_sessions import (
 )
 
 
-# ── 에러 ─────────────────────────────────────────────────────────────────
+# ── errors ─────────────────────────────────────────────────────────────────
 class ActiveSessionUnfoldError(ValueError):
-    """활성 Claude 세션을 해제하려 시도. /quit 후 다시 시도하라는 안내."""
+    """Raised when trying to unfold an active Claude session; ask the user to quit first."""
     def __init__(self, sid: str):
         self.sid = sid
         super().__init__(
-            f"활성 Claude 세션 {sid[:8]} 은 🪚 해제 할 수 없음. "
-            f"먼저 /quit 으로 종료 후 다시 시도하세요."
+            f"Active Claude session {sid[:8]} cannot be unfolded. "
+            f"Run /quit first, then try again."
         )
 
 
 class NoCompactionFoundError(ValueError):
-    """jsonl 에 auto-compact 마커가 0개 — 해제할 게 없음."""
+    """The jsonl file has no auto-compact markers, so there is nothing to unfold."""
     pass
 
 
-# ── boundary 검출 ────────────────────────────────────────────────────────
+# ── boundary detection ────────────────────────────────────────────────────────
 @dataclass
 class CompactBoundary:
-    """검출된 auto-compact 이벤트 메타."""
-    line_idx: int            # jsonl 안의 0-based 라인 번호
-    timestamp: str           # 메시지의 timestamp (없으면 빈 문자열)
+    """Detected auto-compact event metadata."""
+    line_idx: int            # 0-based line number in the jsonl file
+    timestamp: str           # message timestamp, or an empty string
     detect_method: str       # "isCompactSummary" | "continuation_text" | "compacted_text"
-    summary: str             # 첫 80자 미리보기 (UI 표시용)
+    summary: str             # first 80 chars for UI preview
 
 
 _CONT_PATTERNS = (
@@ -80,10 +77,9 @@ _COMPACTED_PATTERNS = (
 
 
 def _extract_text(obj: dict) -> str:
-    """메시지 dict 에서 사용자에게 보일 텍스트 추출 (첫 줄만 빠르게).
+    """Extract user-visible text from a message dict.
 
-    content 가 list 일 때 각 blk 의 text 가 또 list 인 경우 (예: tool_result
-    의 content) 도 안전하게 string 으로 평탄화.
+    When content is a list, nested block text lists (for example tool_result content) are safely flattened to strings.
     """
     msg = obj.get("message") or {}
     content = msg.get("content")
@@ -97,7 +93,7 @@ def _extract_text(obj: dict) -> str:
                 if isinstance(t, str):
                     parts.append(t)
                 elif isinstance(t, list):
-                    # nested — 재귀 평탄화
+                    # nested — flatten one level
                     for sub in t:
                         if isinstance(sub, dict):
                             st = sub.get("text") or sub.get("content") or ""
@@ -112,14 +108,12 @@ def _extract_text(obj: dict) -> str:
 
 
 def detect_compact_boundaries(jsonl_path: Path) -> list[CompactBoundary]:
-    """auto-compact 이벤트 라인 검출. 시간순 정렬.
+    """Detect auto-compact event lines and sort them by line number.
 
-    엄격 모드 — `isCompactSummary: True` 플래그만 신뢰.
-    텍스트 매칭 (CONT / Compacted) 은 false positive (search 결과 등에서
-    우연히 phrase 가 포함되는 경우) 가 빈번해 제거됨 (2026-05-05 발견).
+    Strict mode trusts only the `isCompactSummary: True` flag.
+    Text matching (CONT / Compacted) was removed because it frequently produced false positives when search results happened to include those phrases (found 2026-05-05).
 
-    Claude Code 가 진짜 auto-compact 시 isCompactSummary 를 항상 set 함 →
-    이 한 가지로 충분.
+    Claude Code sets isCompactSummary for real auto-compact events, so this single signal is enough.
     """
     out: list[CompactBoundary] = []
     if not jsonl_path.exists():
@@ -149,14 +143,14 @@ def detect_compact_boundaries(jsonl_path: Path) -> list[CompactBoundary]:
     return out
 
 
-# ── segment 분할 + 슬림 ─────────────────────────────────────────────────
+# ── segment split and slim ─────────────────────────────────────────────────
 @dataclass
 class SegmentStats:
-    """한 segment 의 슬림 전후 통계."""
-    idx: int                 # 0-based segment 번호
-    is_last: bool            # 마지막 segment 여부 (보호 대상)
-    line_start: int          # 원본 jsonl 의 시작 라인 (inclusive)
-    line_end: int            # 끝 라인 (exclusive)
+    """Before/after slim statistics for one segment."""
+    idx: int                 # 0-based segment number
+    is_last: bool            # whether this is the protected final segment
+    line_start: int          # start line in the source jsonl (inclusive)
+    line_end: int            # end line (exclusive)
     bytes_before: int
     bytes_after: int
     lines_before: int
@@ -172,12 +166,12 @@ class SegmentStats:
 
 
 
-# ─── Phase E archive (unfold_python.py 로 이동) ───────────────
+# ─── Phase E archive (moved to unfold_python.py) ───────────────
 # unfold_session + _slim_segment_lines + format_unfold_summary
-# 호출은 _call_rust_unfold_inplace() (Rust subprocess) 로.
+# Calls now go through _call_rust_unfold_inplace() (Rust subprocess).
 
 class UnfoldResult:
-    """🪚 해제 작업 결과."""
+    """Segmented unfold result."""
     boundaries: list[CompactBoundary]
     segments: list[SegmentStats]
     bytes_before: int
@@ -193,18 +187,18 @@ class UnfoldResult:
 
 
 class UnfoldConfirmScreen(ModalScreen):
-    """🪚 해제 확인 모달 — boundary 개수 표시 + 전체/취소.
+    """Segmented Unfold confirmation modal showing boundary count and action choices.
 
     UI:
-      ┌─ 🪚 해제 ──────────────────────────────┐
-      │ 세션: ca09 (22.2 MB)                   │
-      │ auto-compact 마커 N개 발견             │
+      ┌─ Segmented Unfold ──────────────────────────────┐
+      │ Session: ca09 (22.2 MB)                   │
+      │ Found N auto-compact markers             │
       │                                        │
-      │ ◉ 전체 해제 (옛 segment 모두 풀 슬림)  │
-      │ ○ 마지막 빼고                          │
-      │ ○ 취소                                 │
+      │ ◉ Full unfold (fully slim all old segments)  │
+      │ ○ Exclude last segment                          │
+      │ ○ Cancel                                 │
       │                                        │
-      │ [취소]                       [실행]    │
+      │ [Cancel]                       [Run]    │
       └────────────────────────────────────────┘
     """
 
@@ -310,69 +304,69 @@ class UnfoldConfirmScreen(ModalScreen):
         sz = self.session.jsonl_path.stat().st_size
         sz_mb = sz / 1024 / 1024
         n = len(self.boundaries)
-        # 예상 절감 추정 (이전 검증 결과 기반)
+        # Estimated reduction based on previous verification results
         est_inplace_mb = sz_mb * 0.24  # -76%
-        est_inplace_protect_mb = sz_mb * 0.27  # -73% (S3 보호)
+        est_inplace_protect_mb = sz_mb * 0.27  # -73% (S3 protected)
         est_bundle_mb = sz_mb * 0.04  # -96%
 
         with Vertical(id="unfold-box"):
             with Vertical(id="unfold-header"):
-                yield Static(f"🪚 해제 — {self.session.id[:8]}", id="unfold-title")
+                yield Static(f"Segmented Unfold — {self.session.id[:8]}", id="unfold-title")
                 yield Static(
-                    f"{sz_mb:.1f} MB · auto-compact 마커 {n}개 · 모드 선택",
+                    f"{sz_mb:.1f} MB · {n} auto-compact markers · choose mode",
                     id="unfold-meta",
                 )
             with Vertical(id="unfold-body"):
                 with RadioSet(id="unfold-mode"):
                     yield RadioButton(
-                        f"in-place 풀 해제  (예상: {sz_mb:.1f}MB → {est_inplace_mb:.1f}MB · -76%)",
+                        f"in-place full unfold  (estimated: {sz_mb:.1f}MB -> {est_inplace_mb:.1f}MB · -76%)",
                         value=True,
                         id="rb-all",
                     )
                     yield RadioButton(
-                        f"in-place + 마지막 보호  (예상: {sz_mb:.1f}MB → {est_inplace_protect_mb:.1f}MB · -73%)",
+                        f"in-place + protect last segment  (estimated: {sz_mb:.1f}MB -> {est_inplace_protect_mb:.1f}MB · -73%)",
                         id="rb-except-last",
                     )
                     yield RadioButton(
-                        f"🪚 번들 모드 (새 sid)  (예상: {sz_mb:.1f}MB → {est_bundle_mb:.2f}MB · -96%, 인식률 96.8%)",
+                        f"Bundle mode (new sid)  (estimated: {sz_mb:.1f}MB -> {est_bundle_mb:.2f}MB · -96%, recognition 96.8%)",
                         id="rb-bundle",
                     )
 
-                # 모드별 설명
+                # Mode descriptions
                 yield Static(
-                    "  • 풀 해제: 같은 sid 유지, 마커 보존 — Resume 시 마지막 segment 만 active context\n"
-                    "  • + 마지막 보호: 같은 sid, 최근 5턴 KEEP — 작업 중단 없이 청소 (default)\n"
-                    "  • 🪚 번들: 새 sid 트리 자식 등장, 모든 옛 작업 archive injection\n"
-                    "      → 96.8% 인식 (Opus 1M context 검증), 컨텍스트 40% / 활성 60% 여유",
+                    "  • Full unfold: keep the same sid and markers; only the last segment is active context on resume\n"
+                    "  • + protect last: same sid, keep recent 5 turns; clean without interrupting work (default)\n"
+                    "  • Bundle: create a new child sid and inject all old work as an archive\n"
+                    "      -> 96.8% recognition (verified with Opus 1M context), 40% context / 60% active headroom",
                     classes="desc",
                 )
 
-                # 번들 모드 세부 옵션
+                # Bundle mode detail options
                 with Vertical(id="bundle-options"):
-                    yield Static("🪚 번들 모드 세부 (위에서 번들 선택 시 적용):",
+                    yield Static("Bundle mode details (used when bundle is selected above):",
                                  classes="opt-label")
-                    yield Static("번들 크기 (turn 묶을 token 단위):", classes="opt-label")
+                    yield Static("Bundle size (token unit for grouped turns):", classes="opt-label")
                     with RadioSet(id="bundle-size"):
-                        yield RadioButton("12K (작은 번들 — 빠른 head 도달)", id="bs-12k")
-                        yield RadioButton("18K (권장)", value=True, id="bs-18k")
-                        yield RadioButton("25K (큰 번들 — 풍부한 컨텍스트)", id="bs-25k")
-                    yield Static("최근 turn 보호 수:", classes="opt-label")
+                        yield RadioButton("12K (small bundles, faster head reach)", id="bs-12k")
+                        yield RadioButton("18K (recommended)", value=True, id="bs-18k")
+                        yield RadioButton("25K (large bundles, richer context)", id="bs-25k")
+                    yield Static("Recent turn protection:", classes="opt-label")
                     with RadioSet(id="recent-keep"):
                         yield RadioButton("3 turn", id="rk-3")
-                        yield RadioButton("5 turn (권장)", value=True, id="rk-5")
-                        yield RadioButton("10 turn (작업 중간)", id="rk-10")
+                        yield RadioButton("5 turns (recommended)", value=True, id="rk-5")
+                        yield RadioButton("10 turns (mid-work)", id="rk-10")
 
             with Horizontal(id="unfold-btn-row"):
-                yield Button("취소", id="btn-unfold-cancel")
+                yield Button("Cancel", id="btn-unfold-cancel")
                 yield Static("", classes="spacer")
-                yield Button("🪚 실행", id="btn-unfold-go", variant="warning")
+                yield Button("Run", id="btn-unfold-go", variant="warning")
 
     def on_mount(self) -> None:
-        # 초기 상태 — 번들 모드 미선택이라 세부 옵션 비활성화
+        # Initial state: bundle mode is not selected, so detail options are disabled
         self._update_bundle_options_state("rb-all")
 
     def _update_bundle_options_state(self, choice_id: Optional[str]) -> None:
-        """번들 모드 세부 옵션의 활성/비활성 상태 토글."""
+        """Toggle enabled/disabled state for bundle-mode detail options."""
         try:
             box = self.query_one("#bundle-options", Vertical)
         except Exception:
@@ -382,7 +376,7 @@ class UnfoldConfirmScreen(ModalScreen):
             box.set_class(not is_bundle, "-disabled")
         except Exception:
             pass
-        # RadioSet / RadioButton 자체도 disabled 속성 설정
+        # Also set disabled on RadioSet / RadioButton widgets
         try:
             for rb in self.query("#bundle-options RadioButton"):
                 rb.disabled = not is_bundle
@@ -390,7 +384,7 @@ class UnfoldConfirmScreen(ModalScreen):
             pass
 
     def on_radio_set_changed(self, event) -> None:
-        # 메인 모드 라디오 변경 감지 → 세부 옵션 활성화 토글
+        # Main mode radio changes toggle detail options
         if getattr(event.radio_set, "id", None) == "unfold-mode":
             pressed = event.radio_set.pressed_button
             choice = pressed.id if pressed else None
@@ -406,7 +400,7 @@ class UnfoldConfirmScreen(ModalScreen):
             pressed = mode_set.pressed_button
             choice = (pressed.id if pressed else "rb-all")
 
-            # 번들 모드 세부 옵션
+            # Bundle mode detail options
             bundle_size = 18_000
             recent_keep = 5
             try:

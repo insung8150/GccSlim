@@ -117,7 +117,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _trim_to_user_start(messages: list[ClaudeMsg]) -> list[ClaudeMsg]:
-    """Codex TUI replay 안정성: historical replay 는 user turn 으로 시작하게 한다."""
+    """Codex TUI replay stability: historical replay must start with a user turn."""
     for idx, msg in enumerate(messages):
         if msg.role == "user":
             return messages[idx:]
@@ -125,7 +125,7 @@ def _trim_to_user_start(messages: list[ClaudeMsg]) -> list[ClaudeMsg]:
 
 
 def _is_noisy_local_command(text: str) -> bool:
-    """Claude local command wrapper/context 출력처럼 이식 맥락에 해로운 행 제거."""
+    """Remove rows harmful to import context, such as Claude local command output."""
     stripped = text.strip()
     if not stripped:
         return True
@@ -143,7 +143,7 @@ def _is_noisy_local_command(text: str) -> bool:
 
 
 def _build_turns(messages: list[ClaudeMsg]) -> list[ClaudeTurn]:
-    """Claude semantic messages 를 user 시작 턴 단위로 묶는다."""
+    """Group Claude semantic messages into turns starting with a user message."""
     turns: list[ClaudeTurn] = []
     current: ClaudeTurn | None = None
     for msg in messages:
@@ -337,71 +337,72 @@ def build_codex_session(
     recent = _dedupe_messages(context_recent + raw_messages)
     recent_blob = "\n".join(m.text for m in recent)
     observed: list[str] = []
-    if "fold" in recent_blob.lower() or "병합" in recent_blob:
-        observed.append("최근 raw에는 병합/분리와 fold 방식 병합 논의가 포함된다.")
+    if "fold" in recent_blob.lower() or "\ubcd1\ud569" in recent_blob:
+        observed.append("Recent raw includes discussion of merge/split and fold-style merging.")
     if "pristine" in recent_blob or "dirty" in recent_blob:
-        observed.append("최근 raw에는 pristine/dirty 상태에 따른 unmerge 가능성 논의가 포함된다.")
+        observed.append("Recent raw includes discussion of unmerge feasibility by pristine/dirty state.")
     if "linear" in recent_blob and "interleave" in recent_blob:
-        observed.append("최근 raw에는 linear/interleave/parallel/common-only/as-sections 모드 언급이 포함된다.")
+        observed.append("Recent raw mentions linear/interleave/parallel/common-only/as-sections modes.")
     if not observed:
-        observed.append("최근 raw의 구체 결론은 이 세션의 response_item raw 메시지를 기준으로만 판단해야 한다.")
+        observed.append("Specific conclusions from recent raw must be judged only from this session's response_item raw messages.")
 
-    summary = f"""# Claude 세션 → Codex 검증형 이식 세션
+    summary = f"""# Claude Session → Codex Verified Import Session
 
-## 정체
-이 세션은 Claude Code 원본 세션을 Codex에서 열기 위해 새로 만든 파생 세션이다. 원본 Claude JSONL은 수정하지 않았다.
+## Identity
+This is a derived session created so the original Claude Code session can be
+opened in Codex. The original Claude JSONL was not modified.
 
-원본 Claude SID: {source_sid}
-원본 JSONL: {source}
-작업 cwd: {cwd}
-생성 시각: {now_ts}
+Original Claude SID: {source_sid}
+Original JSONL: {source}
+Working cwd: {cwd}
+Created at: {now_ts}
 
-## 직접 파싱으로 검증한 수치
-전체 JSONL 라인: {total_lines}
-파싱 실패 라인: {bad}
+## Counts Verified by Direct Parsing
+Total JSONL lines: {total_lines}
+Parse-failed lines: {bad}
 row type counts: {counts}
 compact marker lines: {markers}
-마지막 compact marker 뒤 active 시작 line: {active_start}
-user/assistant row 수: {len(messages)}
-active user/assistant row 수: {len(active_messages)}
-semantic active 메시지 수(tool plumbing 제외): {len(semantic_active)}
-텍스트 총량(도구 본문 제외, text block 중심): {raw_text_chars} chars
-도구 호출 row 수: {tool_use_count}
-도구 결과 row 수: {tool_result_count}
-Codex에 이식한 semantic 메시지: {len(recent)}개, Claude line {recent[0].line if recent else 'n/a'}..{recent[-1].line if recent else 'n/a'}
-마지막 보호 raw 턴: 요청 {keep_raw_turns}턴 / 실제 {len(raw_turns)}턴
-보호 raw 범위: Claude line {raw_messages[0].line if raw_messages else 'n/a'}..{raw_messages[-1].line if raw_messages else 'n/a'}
-보호 raw 구성: user {len(raw_turns)}개 / assistant {sum(len(t.replies) for t in raw_turns)}개
-로컬 명령 출력 포함 여부: {'포함' if include_local_commands else '제외'}
-compact summary 발췌 문자 수/marker: {compact_excerpt_chars}
+Active start line after the last compact marker: {active_start}
+user/assistant row count: {len(messages)}
+active user/assistant row count: {len(active_messages)}
+semantic active message count (excluding tool plumbing): {len(semantic_active)}
+text volume (excluding tool bodies, text blocks focused): {raw_text_chars} chars
+tool call row count: {tool_use_count}
+tool result row count: {tool_result_count}
+semantic messages imported into Codex: {len(recent)}, Claude lines {recent[0].line if recent else 'n/a'}..{recent[-1].line if recent else 'n/a'}
+protected final raw turns: requested {keep_raw_turns} / actual {len(raw_turns)}
+protected raw range: Claude lines {raw_messages[0].line if raw_messages else 'n/a'}..{raw_messages[-1].line if raw_messages else 'n/a'}
+protected raw composition: user {len(raw_turns)} / assistant {sum(len(t.replies) for t in raw_turns)}
+local command output included: {'yes' if include_local_commands else 'no'}
+compact summary excerpt chars/marker: {compact_excerpt_chars}
 
-## 직접 검증된 구조적 결론
-- 원본 전체 raw를 Codex 256k에 그대로 넣는 것은 부적절하다. 전체 user/assistant row가 {len(messages)}개이고 active만 {len(active_messages)}개다.
-- 이 Codex 세션은 전체 복제본이 아니라 developer summary + compact summary 발췌 + 최근 semantic 맥락 + 마지막 보호 raw 턴 기반의 작업 인덱스 세션이다.
-- 마지막 보호 raw 턴은 user 질문과 그 뒤 assistant 답변 묶음을 턴 단위로 보존한다.
-- tool_use/tool_result 원문은 Codex 컨텍스트에 넣지 않았다. 정확한 도구 출력은 원본 JSONL에서 검색해야 한다.
-- `/context` 같은 로컬 명령 출력은 기본적으로 제외했다.
-- 기존 compact marker 이전 영역은 Claude 원본의 오래된 압축/기록 영역으로 취급한다.
+## Directly Verified Structural Conclusions
+- Copying the full original raw transcript into Codex 256k is inappropriate. There are {len(messages)} total user/assistant rows and {len(active_messages)} active rows.
+- This Codex session is not a full clone; it is a work-index session built from a developer summary, compact summary excerpts, recent semantic context, and protected final raw turns.
+- Protected final raw turns preserve user prompts and following assistant replies by turn.
+- tool_use/tool_result originals were not inserted into Codex context. Search the original JSONL for exact tool output.
+- Local command output such as `/context` is excluded by default.
+- Content before the existing compact marker is treated as the older compacted/history area of the original Claude session.
 
-## 최근 raw에서 확인 가능한 내용
+## Recent Raw Observations
 """
     for item in observed:
         summary += f"- {item}\n"
 
     if compact_summaries:
-        summary += "\n## Claude native compact summary 발췌\n"
-        summary += "아래 내용은 원본 Claude JSONL의 isCompactSummary 메시지에서 직접 가져온 발췌다. 별도 검증된 테스트 결과가 아니라 원본 압축 요약 텍스트로 취급한다.\n"
+        summary += "\n## Claude Native Compact Summary Excerpts\n"
+        summary += "The following text is excerpted directly from isCompactSummary messages in the original Claude JSONL. Treat it as original compact-summary text, not independently verified test results.\n"
         for msg in compact_summaries:
             summary += f"\n### compact marker line {msg.line}\n"
             summary += _truncate(msg.text, compact_excerpt_chars) + "\n"
 
     summary += f"""
 
-## 답변 규칙
-- 이 세션은 원본 전체를 다 기억하는 완전 복제 세션이라고 말하지 말 것.
-- 직접 파싱한 수치와 최근 raw에서 확인되는 내용만 확정적으로 말할 것.
-- commit hash, 테스트 통과 개수, 파일 크기 변화 같은 세부 수치는 이 summary에 명시적으로 없으면 원본 JSONL 또는 repo에서 재확인해야 한다고 답할 것.
-- 원본 로그, 명령 출력, tool result가 필요하면 다음 파일을 열어 검색하라고 안내할 것: {source}
+## Answering Rules
+- Do not say this session is a complete clone that remembers the entire original.
+- State only directly parsed counts and facts visible in recent raw with certainty.
+- If commit hashes, test-pass counts, file-size changes, or similar details are not explicitly in this summary, say they must be rechecked in the original JSONL or repo.
+- When original logs, command output, or tool results are needed, tell the user to open and search this file: {source}
 """
 
     base_instructions = (
@@ -447,7 +448,7 @@ compact summary 발췌 문자 수/marker: {compact_excerpt_chars}
                 "role": "user",
                 "content": _msg_content(
                     "user",
-                    "Claude 세션을 Codex로 이식한 파생 세션입니다. 위 developer summary와 이어지는 최근 raw를 기준으로 작업 맥락을 이어가세요.",
+                    "This is a derived session imported from Claude into Codex. Continue from the developer summary above and the following recent raw context.",
                 ),
             },
             now_ts,
@@ -457,7 +458,7 @@ compact summary 발췌 문자 수/marker: {compact_excerpt_chars}
             _turn_context_payload(
                 first_turn,
                 cwd,
-                user_instructions="한국어로 간결하게 답하고, 검증되지 않은 세부 수치는 원본 확인 필요라고 말한다.",
+                user_instructions="Answer concisely. Say that unverified details must be checked against the original.",
             ),
             now_ts,
         ),
@@ -502,7 +503,7 @@ compact summary 발췌 문자 수/marker: {compact_excerpt_chars}
                         _turn_context_payload(
                             current_turn,
                             cwd,
-                            user_instructions="한국어로 간결하게 답하고, 검증되지 않은 세부 수치는 원본 확인 필요라고 말한다.",
+                            user_instructions="Answer concisely. Say that unverified details must be checked against the original.",
                         ),
                         msg.timestamp,
                     )

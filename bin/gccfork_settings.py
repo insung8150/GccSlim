@@ -1,30 +1,30 @@
-"""gccfork — ⚙ 설정 모달 + 섹션 레지스트리 (사이드카 모듈).
+"""gccfork settings modal and section registry sidecar module.
 
-main 의 사용:
+Main module usage:
     from gccfork_settings import SettingsScreen, get_deep_prefs_snapshot, get_scannable_text
 
-    # 액션바 ⚙ 버튼 핸들러:
+    # Action-bar settings button handler:
     self.push_screen(SettingsScreen())
 
-    # 딥검색 워커:
+    # Deep-search worker:
     prefs = get_deep_prefs_snapshot()
-    scannable = get_scannable_text(obj, prefs)   # '' 면 그 라인은 노이즈로 간주, skip
+    scannable = get_scannable_text(obj, prefs)   # '' means the line is noise and skipped
     if scannable and line_match(scannable):
         ...
 
-새 설정 섹션 추가 절차:
-    1. `get_settings_sections()` 의 리스트에 dict 한 개 추가
-       - "type": "checkboxes" 면 items: [{key, label, hint, default}, ...]
-       - "type": "text" 면 content: "<읽기 전용 본문>"
-    2. 체크박스 키는 그대로 prefs 키 → 코드에서 `pref_get(key, default)` 로 읽기
-    3. SettingsScreen 의 compose 는 자동으로 새 섹션을 렌더 (수정 불필요)
+Adding a new settings section:
+    1. Add one dict to the list returned by `get_settings_sections()`.
+       - "type": "checkboxes" uses items: [{key, label, hint, default}, ...]
+       - "type": "text" uses content: "<read-only body>"
+    2. Checkbox keys are prefs keys; read them with `pref_get(key, default)`.
+    3. SettingsScreen.compose automatically renders the new section.
 
-딥검색 5개 노이즈 카테고리(2026-04-27 추가):
-    - attachment            : Claude Code 자동 첨부 메타 (파일명/경로)
-    - file-history-snapshot : cwd 파일 스냅샷
-    - tool_result           : ls/find/git 등 도구 출력
-    - tool_use args         : tool_use 의 input(command/path 등)
-    - system / 내부 메시지   : system, isMeta, isSidechain, <system-reminder>, /command 입력, thinking
+Five deep-search noise categories added on 2026-04-27:
+    - attachment            : Claude Code auto-attachment metadata such as file names/paths
+    - file-history-snapshot : cwd file snapshots
+    - tool_result           : tool output such as ls/find/git
+    - tool_use args         : tool_use input such as command/path
+    - system/internal       : system, isMeta, isSidechain, <system-reminder>, /command input, thinking
 """
 from __future__ import annotations
 
@@ -39,9 +39,11 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, RadioButton, RadioSet, Static, TextArea
 
+from gccfork_i18n import LANGUAGE_PREF_KEY, current_language, set_language_pref, tr
 
-# main 의 INTERNAL_USER_PREFIXES 와 동일 (parse_session 에서 같은 문자열 사용).
-# user 메시지가 이 prefix 로 시작하면 system 자동 텍스트로 간주.
+
+# Same values as main.INTERNAL_USER_PREFIXES; parse_session uses the same strings.
+# User messages starting with these prefixes are treated as automatic system text.
 _INTERNAL_USER_PREFIXES = (
     "<command-name>",
     "<command-message>",
@@ -58,7 +60,7 @@ class SettingsBrainButton(Static, can_focus=True):
     """One-line brain button for settings panes."""
 
     def __init__(self, target: str) -> None:
-        super().__init__("🧠 지능", id=f"btn-settings-brain-{target}")
+        super().__init__("🧠 AI", id=f"btn-settings-brain-{target}")
         self.target = target
 
     async def on_click(self) -> None:
@@ -75,82 +77,82 @@ class SettingsBrainButton(Static, can_focus=True):
                 screen._open_settings_brain_agent(self.target)
 
 
-# ─── 딥검색 노이즈 필터 5개 ────────────────────────────────────────────
-# default=False (체크 해제 = 노이즈 필터링 ON = 매처에서 제외).
-# 체크하면 그 카테고리도 매치 대상에 포함 (옛 동작 복원).
+# ─── Deep-search noise filters ───────────────────────────────────────────────
+# default=False means unchecked, noise filtering on, excluded from matcher.
+# Checking a category includes it in matching and restores the old behavior.
 DEEP_SEARCH_ITEMS: list[dict] = [
     {
         "key": "deep_include_attachment",
-        "label": "[attachment] 라인 매치에 포함",
-        "hint": "Claude Code 가 자동 첨부한 파일 메타. 파일명/경로가 박혀 있어 노이즈가 큼.",
+        "label": "Include [attachment] lines in matching",
+        "hint": "File metadata auto-attached by Claude Code. File names and paths often create noise.",
         "default": False,
     },
     {
         "key": "deep_include_file_history",
-        "label": "[file-history-snapshot] 매치에 포함",
-        "hint": "세션 시작/재개 시 cwd 파일 스냅샷. 파일명 substring 매치가 흔함.",
+        "label": "Include [file-history-snapshot] in matching",
+        "hint": "cwd file snapshot on session start/resume. File-name substring matches are common.",
         "default": False,
     },
     {
         "key": "deep_include_tool_result",
-        "label": "tool_result 본문 매치에 포함  (ls/find/git/cat 출력 등)",
-        "hint": "도구 출력에 파일명/디렉토리 리스팅이 들어와 무관 매치가 발생.",
+        "label": "Include tool_result body in matching (ls/find/git/cat output, etc.)",
+        "hint": "Tool output often contains file names and directory listings that cause unrelated matches.",
         "default": False,
     },
     {
         "key": "deep_include_tool_use_args",
-        "label": "tool_use 인자(command/path/...) 매치에 포함",
-        "hint": "Bash 의 command, Read/Edit 의 file_path 등 도구 호출 메타.",
+        "label": "Include tool_use arguments (command/path/...) in matching",
+        "hint": "Tool-call metadata such as Bash command or Read/Edit file_path.",
         "default": False,
     },
     {
         "key": "deep_include_system_internal",
-        "label": "system / <system-reminder> / 내부 메시지 매치에 포함",
-        "hint": "system 자동 텍스트, /command 입력, isMeta/isSidechain, thinking 블록.",
+        "label": "Include system / <system-reminder> / internal messages in matching",
+        "hint": "Automatic system text, /command input, isMeta/isSidechain, and thinking blocks.",
         "default": False,
     },
     {
         "key": "deep_include_fuzzy",
-        "label": "fuzzy 매치 허용  (rapidfuzz partial_ratio ≥ 80)",
-        "hint": "비슷한 단어도 매치. 예: 'altera' 검색이 'alternate-screen' 매치 가능 → 디폴트 OFF.",
+        "label": "Allow fuzzy matching (rapidfuzz partial_ratio >= 80)",
+        "hint": "Similar words can match. Example: searching 'altera' can match 'alternate-screen'. Default OFF.",
         "default": False,
     },
 ]
 
 
-# ─── 슬림 모드 — 3개 프리셋 (strong / medium / weak, 한국어 강중약) ────
-# 각 모드 × 5 카테고리 = 15 prefs 키. KEEP=True 면 그 카테고리 라인을
-# (또는 stub 으로) 보존, False 면 DROP.
+# ─── Slim modes: three presets, strong / medium / weak ───────────────────────
+# Each mode times five categories creates 15 prefs keys. KEEP=True preserves
+# that category line or a stub; False drops it.
 #
-# 디폴트 정책:
-#   strict:    "지금의 구조" — 5개 모두 False (텍스트만 보존, 가장 작은 슬림)
-#   balanced:  텍스트 + tool_use 한 줄 + system_internal 부분 + 에러 tool_result
-#   loose:     balanced + 첫 attachment + 짧은 tool_result 도 보존
+# Default policy:
+#   strict:   current structure; all five false, text only, smallest slim
+#   balanced: text plus one-line tool_use, partial system_internal, error tool_result
+#   loose:    balanced plus first attachment and short tool_result output
 SLIM_CATEGORIES: list[dict] = [
     {
         "cat": "attachment",
-        "label": "[attachment] 보존 (첫 첨부 1줄 stub)",
-        "hint": "사용자가 무엇을 컨텍스트에 처음 넣었는지 — 반복 재첨부는 항상 제외.",
+        "label": "Preserve [attachment] as a one-line stub for the first attachment",
+        "hint": "Shows what the user first put into context. Repeated reattachments are always excluded.",
     },
     {
         "cat": "file_history",
-        "label": "[file-history-snapshot] 보존",
-        "hint": "cwd 파일 변경 스냅샷. 보통 노이즈, KEEP 시에도 1줄 stub 으로.",
+        "label": "Preserve [file-history-snapshot]",
+        "hint": "cwd file-change snapshot. Usually noise; preserved as a one-line stub when kept.",
     },
     {
         "cat": "tool_result",
-        "label": "tool_result 보존 (에러 우선, 짧은 출력)",
-        "hint": "Bash/ls/cat 등 도구 출력. 에러는 항상, 성공은 ≤200자만 보존.",
+        "label": "Preserve tool_result (errors first, short output)",
+        "hint": "Tool output from Bash/ls/cat, etc. Errors are always kept; successful output is kept only up to 200 chars.",
     },
     {
         "cat": "tool_use_args",
-        "label": "tool_use 인자 보존 (이름 + 짧은 input)",
-        "hint": "AI 가 무엇을 호출했는지 trace. name + 첫 80자만 1줄 요약.",
+        "label": "Preserve tool_use arguments (name plus short input)",
+        "hint": "Trace what the AI called. One-line summary with name plus the first 80 input chars.",
     },
     {
         "cat": "system_internal",
-        "label": "system / thinking / 슬래시 명령 보존",
-        "hint": "thinking 첫 1문장, /compact 같은 사용자 명시 명령, 압축 요약.",
+        "label": "Preserve system / thinking / slash commands",
+        "hint": "First thinking sentence, explicit user slash commands such as /compact, and compact summaries.",
     },
 ]
 
@@ -161,19 +163,19 @@ SLIM_MODE_DEFAULTS: dict[str, dict[str, bool]] = {
 }
 
 SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
-    "strong": ("🔻 슬림 (strong)", "텍스트만 보존 — 가장 작음 (~3% 원본). 디폴트."),
-    "medium": ("🔻 슬림 (medium)", "텍스트 + 도구 호출 trace + thinking 첫 문장 — 흐름 가독성 (~15% 원본)."),
-    "weak":   ("🔻 슬림 (weak)",   "medium + 첨부 + 파일 history — 보수적 슬림 (~50% 원본)."),
+    "strong": ("🔻 Slim (strong)", "Text only; smallest output, about 3% of original. Default."),
+    "medium": ("🔻 Slim (medium)", "Text plus tool-call trace and first thinking sentence; readable flow, about 15% of original."),
+    "weak":   ("🔻 Slim (weak)",   "medium plus attachments and file history; conservative slim, about 50% of original."),
 }
 
 CODEX_SLIM_MODE_LABELS: dict[str, tuple[str, str]] = {
     "safe": (
-        "안전 모드",
-        "이전 compact 요약 전부 + 현재 slim 본문 + 최근 raw 10턴을 보존합니다. 복구/검토 우선입니다.",
+        "Safe mode",
+        "Keeps all previous compact summaries, the current slim body, and the latest 10 raw turns. Prioritizes recovery/review.",
     ),
     "strong": (
-        "강력 모드",
-        "이전 compact 요약 전부 + 현재 slim 본문 + 최근 raw 3턴만 보존합니다. 컨텍스트 확보 우선입니다.",
+        "Strong mode",
+        "Keeps all previous compact summaries, the current slim body, and only the latest 3 raw turns. Prioritizes context space.",
     ),
 }
 
@@ -182,44 +184,47 @@ CODEX_SLIM_MODE_DEFAULT_KEEP: dict[str, int] = {
     "strong": 3,
 }
 
-# 옛 키 마이그레이션 alias (CLI / 옛 registry 호환용)
+# Legacy key migration aliases for CLI and old registry compatibility.
 SLIM_MODE_ALIASES: dict[str, str] = {
     "strict": "strong",
     "balanced": "medium",
     "loose": "weak",
 }
 
-# claude `/slim` 슬래시명령이 gccfork TUI 에 위임할 때 참조하는 기본값.
-# 사용자는 SettingsScreen 의 [🔻 슬림] 탭에서 변경 가능.
+# Defaults used when the claude `/slim` slash command delegates to gccfork TUI.
+# Users can change these in the SettingsScreen [Slim] tab.
 #
-# 보호 턴은 **모드별 차등** — 강도와 보호 강도가 합리적 그라데이션:
-#   strong → 5 턴   (강하게 자름. 보호 짧음)
-#   medium → 10 턴  (균형)
-#   weak   → 30 턴  (많이 보존. 보호 길음)
-# claude `/slim` 호출 시 `slim_default_mode` 가 가리키는 모드의 turns 키 조회.
+# Protected turns vary by mode, forming a reasonable strength gradient:
+#   strong -> 5 turns, aggressive trim and short protection
+#   medium -> 10 turns, balanced
+#   weak   -> 30 turns, more preservation and longer protection
+# claude `/slim` reads the turns key for the mode pointed to by `slim_default_mode`.
 SLIM_DEFAULT_PREFS: dict[str, "str | int | bool"] = {
     "slim_default_mode": "strong",                # strong | medium | weak
-    "slim_default_reload": True,                  # True 면 슬림 후 자동 resume, False 면 disk 만 슬림
+    "slim_default_reload": True,                  # True auto-resumes after slim; False only slims on disk
     "slim_strong_keep_recent_turns": 5,
     "slim_medium_keep_recent_turns": 10,
     "slim_weak_keep_recent_turns": 30,
-    "slim_default_anti_fragmentation": True,      # True 면 번들(묶음) 처리 (bundle 구조, in-place) — Claude 인식률 향상 권장값
-    "slim_default_dynamic_cap": True,             # True 면 jsonl 크기 측정해 cap 자동 조정 (1M context 안에)
-    "slim_default_visible_cap_compact": True,     # True 면 context 비포함 영역을 native compact marker 앞으로 (cap_overflow 시)
-    "slim_default_send_other_env": False,         # True 면 다른 환경 (VSCode bridge / gnome-terminal) 로 보내기 디폴트
-    "slim_default_newtab": False,                 # True 면 새 탭으로 열기, False 면 새 창
+    "slim_default_anti_fragmentation": True,      # True bundles included-context lines in place; recommended for Claude recognition
+    "slim_default_dynamic_cap": True,             # True auto-adjusts cap by jsonl size to fit 1M context
+    "slim_default_visible_cap_compact": True,     # True moves non-context region before native compact marker on cap overflow
+    "slim_default_send_other_env": False,         # True defaults to sending to another environment, such as VSCode bridge or gnome-terminal
+    "slim_default_newtab": False,                 # True opens in a new tab; False opens a new window
     "codex_slim_default_mode": "strong",          # safe | strong
-    "codex_slim_keep_recent": 3,                  # Codex /slim 기본 최근 user turn 보존 수
-    "codex_slim_include_compact_summaries": True, # 이전 compact/압축 요약을 새 컨텍스트에 포함
-    "codex_slim_default_clone": False,            # True 면 원본 보존 slim 복제본 생성
-    "codex_slim_default_reload": True,            # True 면 슬림 후 자동 열기/재시작
+    "codex_slim_keep_recent": 3,                  # Default number of latest Codex user turns preserved by /slim
+    "codex_slim_include_compact_summaries": True, # Include previous compact summaries in the new context
+    "codex_slim_trim_recent_tools": True,         # 제거 tool/plumbing rows even from recent raw protected turns
+    "codex_slim_compact_event_types": "",         # Extra event_msg.payload.type values treated as compact summary sources
+    "codex_slim_compact_text_keys": "",           # Extra payload keys searched for compact summary text
+    "codex_slim_default_clone": False,            # True creates a slim clone while preserving the original
+    "codex_slim_default_reload": True,            # True reopens/restarts after slim
     "codex_slim_default_send_other_env": False,
     "codex_slim_default_newtab": False,
 }
 
 
 def _slim_items_for_mode(mode: str) -> list[dict]:
-    """3 모드 × 5 카테고리 = 15개 prefs 항목을 한 모드분 빌드."""
+    """Build one mode's prefs items from the 3-mode by 5-category matrix."""
     defaults = SLIM_MODE_DEFAULTS[mode]
     return [
         {
@@ -234,35 +239,35 @@ def _slim_items_for_mode(mode: str) -> list[dict]:
 
 
 # ─── Phase A archive (2026-05-06) ───────────────────────────────────────
-# get_slim_mode_prefs + slim_line_verdict + _stub_* helpers 모두
-# bin/_archive_2026-05-06_phase_a_python/verdict_python.py 로 이동.
-# Rust 단일 처리 — 호출은 ~/.local/bin/gccfork 의 _call_rust_slim_general()
-# (subprocess) 으로 라우팅됨.
+# get_slim_mode_prefs, slim_line_verdict, and _stub_* helpers moved to
+# bin/_archive_2026-05-06_phase_a_python/verdict_python.py.
+# Rust is the single processing path, routed through ~/.local/bin/gccfork
+# _call_rust_slim_general() via subprocess.
 
 def get_settings_sections() -> list[dict]:
-    """섹션 레지스트리 — 호출 시점 빌드 (HelpScreen import 가 module load 시점에 실패해도 안전).
+    """Build the section registry at call time so HelpScreen import failures are safe.
 
-    섹션 dict 키:
-      - id: 식별자 (CSS / 추후 라우팅용)
-      - title: 헤더 표시 텍스트
+    Section dict keys:
+      - id: identifier for CSS and future routing
+      - title: visible header text
       - type: "checkboxes" | "text"
-      - intro: (선택) 헤더 아래 설명 한 줄
+      - intro: optional one-line description below the header
       - items: (checkboxes) [{key, label, hint, default}, ...]
-      - content: (text) 읽기 전용 본문
+      - content: read-only text body
     """
     out: list[dict] = [
         {
             "id": "deep-search",
-            "title": "🔬 딥검색 — 본문 매처 노이즈 필터",
+            "title": "🔬 Deep Search — Body Matcher Noise Filters",
             "type": "checkboxes",
             "intro": (
-                "체크 = 매치에 포함 (노이즈 허용)  /  체크 해제 = 매처에서 제외 (필터링).\n"
-                "디폴트: 5개 모두 해제 → 사용자가 실제 입력한 본문에서만 매치됨."
+                "Checked = include in matching and allow noise. Unchecked = exclude from matcher.\n"
+                "Default: all five unchecked, so matches come only from user-entered body text."
             ),
             "items": DEEP_SEARCH_ITEMS,
         },
     ]
-    # 슬림 3개 모드 — 각 모드 × 5 카테고리 = 15 체크박스 (자동 생성)
+    # Three slim modes, each with five categories, generate 15 checkboxes.
     for mode in ("strong", "medium", "weak"):
         title, intro = SLIM_MODE_LABELS[mode]
         out.append({
@@ -271,161 +276,161 @@ def get_settings_sections() -> list[dict]:
             "type": "checkboxes",
             "intro": (
                 f"{intro}\n"
-                "체크 = 그 카테고리도 (stub 으로) 보존  /  체크 해제 = 완전 DROP."
+                "Checked = preserve that category, possibly as a stub. Unchecked = drop it completely."
             ),
             "items": _slim_items_for_mode(mode),
         })
-    # 🗂 Archive 섹션 — 현재 prefs 값 read-only 표시 (RadioSet UI 는 추후)
+    # Archive section: read-only current prefs display; RadioSet UI follows below.
     out.append({
         "id": "archive",
-        "title": "🗂 Archive (병합) — 현재 설정",
+        "title": "🗂 Archive / Merge — Current Settings",
         "type": "text",
         "content": _build_archive_settings_text(),
     })
     out.append({
         "id": "help",
-        "title": "❓ 도움말",
+        "title": "❓ Help",
         "type": "text",
         "content": _load_help_text(),
     })
     return out
 
 
-# ─── 🗂 Archive 옵션 spec — settings UI 가 사용 ────────────────────────
-# 각 옵션:
-#   key    — prefs key (gccfork_archive.ARCHIVE_DEFAULTS 의 키와 일치)
+# ─── Archive option specs used by settings UI ────────────────────────────────
+# Each option:
+#   key    — prefs key, matching gccfork_archive.ARCHIVE_DEFAULTS
 #   kind   — "radio" (enum) | "bool" (Checkbox)
-#   label  — UI 표시 라벨
-#   hint   — 설명 (선택)
-#   choices — radio 의 경우 [(value, label), ...]
+#   label  — visible UI label
+#   hint   — optional explanation
+#   choices — for radio: [(value, label), ...]
 ARCHIVE_OPTIONS: list[dict] = [
     {
         "key": "archive_preview_mode",
         "kind": "radio",
-        "label": "Preview 통합 방식",
-        "hint": "부모 미리보기에 archive 자식들을 어떻게 보여줄지",
+        "label": "Preview integration mode",
+        "hint": "How archived children are shown in the parent preview",
         "choices": [
-            ("tail_sections", "📜 자식 섹션 끝에 (default)"),
-            ("interleave", "⏱ 시간순 인터리브"),
-            ("headers_only", "📋 헤더만 (간략)"),
-            ("split", "↕ 상하 분할 picker"),
+            ("tail_sections", "📜 Append child sections at the end (default)"),
+            ("interleave", "⏱ Interleave by timestamp"),
+            ("headers_only", "📋 Headers only (compact)"),
+            ("split", "↕ Split picker"),
         ],
     },
     {
         "key": "archive_search_includes_children",
         "kind": "bool",
-        "label": "자식 본문 검색 통합 (deep search 시 archive 자식도)",
+        "label": "Include child bodies in deep search",
     },
     {
         "key": "archive_important_handling",
         "kind": "radio",
-        "label": "★ 중요 표시된 세션 archive 시",
+        "label": "When archiving sessions marked important (★)",
         "choices": [
-            ("confirm", "한 번 더 confirm (안전)"),
-            ("auto_include", "자동 포함 (질문 안 함)"),
-            ("reject", "거부 (★ 떼고 다시)"),
+            ("confirm", "Ask for one more confirmation (safe)"),
+            ("auto_include", "Include automatically"),
+            ("reject", "Reject until ★ is removed"),
         ],
     },
     {
         "key": "archive_restore_enabled",
         "kind": "radio",
-        "label": "복원 기능",
+        "label": "Restore behavior",
         "choices": [
-            ("trash_pattern", "🗑 휴지통 패턴 (복원 가능)"),
-            ("permanent", "⛔ 영구 (복원 X)"),
+            ("trash_pattern", "🗑 Trash pattern (restorable)"),
+            ("permanent", "⛔ Permanent (not restorable)"),
         ],
     },
     {
         "key": "archive_trigger_mode",
         "kind": "radio",
-        "label": "트리거 진입점",
+        "label": "Trigger entry point",
         "choices": [
-            ("both", "🗂 버튼 + Ctrl+Shift+M (둘 다)"),
-            ("button", "🗂 버튼만"),
-            ("keybinding", "Ctrl+Shift+M 만"),
+            ("both", "🗂 Button + Ctrl+Shift+M"),
+            ("button", "🗂 Button only"),
+            ("keybinding", "Ctrl+Shift+M only"),
         ],
     },
     {
         "key": "archive_lazy_load",
         "kind": "bool",
-        "label": "Lazy load (자식 본문 처음 5KB만 표시 — 무거운 jsonl 보호)",
+        "label": "Lazy load, showing only the first 5KB of child bodies to protect heavy jsonl files",
     },
     {
         "key": "archive_child_color_distinction",
         "kind": "bool",
-        "label": "자식별 색깔 구분 (각 자식의 root 색)",
+        "label": "Distinguish children by color using each child's root color",
     },
     {
         "key": "archive_section_header_format",
         "kind": "radio",
-        "label": "자식 섹션 헤더 포맷",
+        "label": "Child section header format",
         "choices": [
             ("simple", "▶ short_id  name"),
-            ("verbose", "▶ short_id  name  ·  N턴  ·  KB  ·  archived_at"),
+            ("verbose", "▶ short_id  name  ·  N turns  ·  KB  ·  archived_at"),
         ],
     },
     {
         "key": "archive_child_sort_order",
         "kind": "radio",
-        "label": "자식 정렬 순서",
+        "label": "Child sort order",
         "choices": [
-            ("mtime", "최근 수정순"),
-            ("branch_order", "분기 시점순 (archived_at)"),
-            ("alphabetic", "이름 알파벳순"),
+            ("mtime", "Recently modified first"),
+            ("branch_order", "Branch time order (archived_at)"),
+            ("alphabetic", "Alphabetical by name"),
         ],
     },
     {
         "key": "archive_folder_layout",
         "kind": "radio",
-        "label": "Archive 폴더 위치",
+        "label": "Archive folder layout",
         "choices": [
-            ("per_project", "프로젝트별 — <P>/archive/"),
-            ("central", "통합 — ~/.claude/gccfork-archive/<P>/"),
+            ("per_project", "Per project — <P>/archive/"),
+            ("central", "Central — ~/.claude/gccfork-archive/<P>/"),
         ],
     },
-    # ── True Merge (model B / Phase 6) 옵션 ─────────────────────────────
+    # ── True Merge options, model B / Phase 6 ────────────────────────────────
     {
         "key": "merge_stitching_method",
         "kind": "radio",
-        "label": "🗂 병합 stitching 방법 (active jsonl)",
-        "hint": "병합으로 만들어진 새 세션에서 어떤 통합 방식을 보여줄지",
+        "label": "🗂 Merge stitching method for active jsonl",
+        "hint": "Which integrated view to show in the newly merged session",
         "choices": [
-            ("interleave",   "interleave — 공통 + 고유 timestamp 정렬 + 출신 prefix [sid HH:MM] (기본)"),
-            ("linear",       "linear — 공통 + 각자 고유 순차 chain"),
-            ("parallel",     "parallel — 공통 + 분기 그대로 유지"),
-            ("common-only",  "common-only — 공통만 (고유 drop)"),
-            ("as-sections",  "as-sections — 공통 + 섹션 구분자 + 각 고유"),
+            ("interleave",   "interleave — common + unique messages sorted by timestamp + origin prefix [sid HH:MM] (default)"),
+            ("linear",       "linear — common + each unique tail as a sequential chain"),
+            ("parallel",     "parallel — common + keep branches intact"),
+            ("common-only",  "common-only — common only; drop unique tails"),
+            ("as-sections",  "as-sections — common + section dividers + each unique tail"),
         ],
     },
 ]
 
 
 def _build_archive_settings_text() -> str:
-    """archive 옵션 10개의 현재 값 표시 + 변경 방법 안내.
+    """Show current archive option values and how to change them.
 
-    옵션 키에 점 (`archive.preview_mode` 등) 이 있어 textual id 충돌 위험으로
-    체크박스 UI 미사용. prefs 파일 직접 편집 또는 추후 별도 모달.
+    Dotted option keys such as `archive.preview_mode` can collide with textual ids,
+    so older versions used no checkbox UI here. The current UI keeps ids underscore-based.
     """
     try:
         from gccfork_archive import ARCHIVE_DEFAULTS, get_archive_pref
     except ImportError:
-        return "(archive 모듈 import 실패)"
+        return "(failed to import archive module)"
 
     LABELS = {
-        "archive_preview_mode": ("Preview 통합 방식", "interleave / tail_sections / headers_only / split"),
-        "archive_search_includes_children": ("자식 본문 검색 통합", "true / false"),
-        "archive_important_handling": ("★ 중요 archive 시", "auto_include / confirm / reject"),
-        "archive_restore_enabled": ("복원 기능", "trash_pattern / permanent"),
-        "archive_trigger_mode": ("트리거 진입점", "keybinding / button / both"),
-        "archive_lazy_load": ("Lazy load (자식 본문 부분만)", "true / false"),
-        "archive_child_color_distinction": ("자식별 색깔 구분", "true / false"),
-        "archive_section_header_format": ("자식 헤더 포맷", "simple / verbose"),
-        "archive_child_sort_order": ("자식 정렬", "mtime / branch_order / alphabetic"),
-        "archive_folder_layout": ("Archive 폴더 위치", "per_project / central"),
+        "archive_preview_mode": ("Preview integration mode", "interleave / tail_sections / headers_only / split"),
+        "archive_search_includes_children": ("Include child bodies in search", "true / false"),
+        "archive_important_handling": ("When archiving important sessions", "auto_include / confirm / reject"),
+        "archive_restore_enabled": ("Restore behavior", "trash_pattern / permanent"),
+        "archive_trigger_mode": ("Trigger entry point", "keybinding / button / both"),
+        "archive_lazy_load": ("Lazy load child body snippets", "true / false"),
+        "archive_child_color_distinction": ("Distinguish children by color", "true / false"),
+        "archive_section_header_format": ("Child header format", "simple / verbose"),
+        "archive_child_sort_order": ("Child sort order", "mtime / branch_order / alphabetic"),
+        "archive_folder_layout": ("Archive folder layout", "per_project / central"),
         # ── True Merge (Phase 6 model B) ─────────────────────────────────
-        "merge_stitching_method": ("🗂 병합 stitching 방법", "linear / interleave / parallel / common-only / as-sections"),
+        "merge_stitching_method": ("🗂 Merge stitching method", "linear / interleave / parallel / common-only / as-sections"),
     }
-    # MERGE_DEFAULTS 도 같이 표시 (lazy import — 실패 시 archive 만)
+    # Include MERGE_DEFAULTS as well; on lazy-import failure, show archive only.
     DEFAULTS_ALL = dict(ARCHIVE_DEFAULTS)
     try:
         from gccfork_merge import MERGE_DEFAULTS
@@ -434,7 +439,7 @@ def _build_archive_settings_text() -> str:
         pass
 
     def _get_pref(key):
-        # 모든 키는 underscore 그대로 (archive_X, merge_X) — pref_get 직접 조회.
+        # Keys remain underscore-based (archive_X, merge_X); read them directly with pref_get.
         if key.startswith("archive_"):
             return get_archive_pref(key)
         if key.startswith("merge_"):
@@ -443,7 +448,7 @@ def _build_archive_settings_text() -> str:
         return None
 
     lines: list[str] = [
-        "현재 적용된 archive + merge 옵션 값입니다 (●=기본값과 같음, ◆=변경됨):",
+        "Current archive + merge option values (●=default, ◆=changed):",
         "",
     ]
     for key in DEFAULTS_ALL:
@@ -452,27 +457,27 @@ def _build_archive_settings_text() -> str:
         current = _get_pref(key)
         marker = "●" if current == default else "◆"
         lines.append(f"  {marker} {label}")
-        lines.append(f"     키:    {key}")
-        lines.append(f"     현재: {current!r}  (기본: {default!r})")
-        lines.append(f"     선택: {choices}")
+        lines.append(f"     key:     {key}")
+        lines.append(f"     current: {current!r}  (default: {default!r})")
+        lines.append(f"     choices: {choices}")
         lines.append("")
 
     lines += [
-        "변경 방법 (현재):",
-        "  1. ~/.claude/gccfork-registry.json 의 prefs 항목에 직접 추가/수정",
-        "     예: \"prefs\": { \"archive_preview_mode\": \"headers_only\" }",
+        "How to change manually:",
+        "  1. Add or edit prefs in ~/.claude/gccfork-registry.json",
+            "     example: \"prefs\": { \"archive_preview_mode\": \"headers_only\" }",
         "  2. python3 -c \"from gccfork_sessions import pref_set; pref_set('archive.preview_mode', 'headers_only')\"",
-        "  3. 추후 RadioSet 기반 UI 모달 추가 예정",
+        "  3. RadioSet-based UI is available in this settings pane",
         "",
-        "🗂 트리거 (multi-select 후):",
-        "  - 멀티 액션 바의 [🗂 병합] 버튼  (trigger_mode = button / both)",
-        "  - 단축키 Ctrl+Shift+M  (trigger_mode = keybinding / both)",
+        "🗂 Trigger after multi-select:",
+        "  - [🗂 Merge] button in the multi-action bar (trigger_mode = button / both)",
+        "  - Ctrl+Shift+M shortcut (trigger_mode = keybinding / both)",
     ]
     return "\n".join(lines)
 
 
 def _load_help_text() -> str:
-    """gccfork.HelpScreen.HELP_TEXT 를 가져와 그대로 보여줌 (도움말은 단일 진실 소스 유지)."""
+    """Load gccfork.HelpScreen.HELP_TEXT so help stays a single source of truth."""
     for module_name in ("gccfork", "__main__"):
         module = sys.modules.get(module_name)
         help_screen = getattr(module, "HelpScreen", None) if module else None
@@ -484,13 +489,13 @@ def _load_help_text() -> str:
         return HelpScreen.HELP_TEXT
     except Exception as exc:
         return (
-            "[bold red]도움말 로드 실패[/]\n\n"
-            f"HelpScreen.HELP_TEXT 를 찾지 못했습니다: {type(exc).__name__}: {exc}"
+            "[bold red]Failed to load help[/]\n\n"
+            f"Could not find HelpScreen.HELP_TEXT: {type(exc).__name__}: {exc}"
         )
 
 
 def _help_text_for_text_area(text: str) -> str:
-    """TextArea 는 Rich markup 을 해석하지 않으므로 도움말 표시 태그를 제거."""
+    """제거 Rich markup because TextArea does not interpret it."""
     return re.sub(r"\[(?:/?[a-zA-Z][^\]]*|/)\]", "", str(text))
 
 
@@ -509,9 +514,9 @@ def _settings_items_text(title: str, intro: str | None, items: list[dict]) -> st
 
 def _archive_options_text() -> str:
     lines = [
-        "🗂 Archive / 병합 옵션",
+        "🗂 Archive / Merge Options",
         "",
-        "변경 즉시 prefs 에 저장되고 다음 archive 작업부터 적용됩니다.",
+        "Changes are saved to prefs immediately and apply from the next archive operation.",
     ]
     for opt in ARCHIVE_OPTIONS:
         lines.append("")
@@ -528,49 +533,49 @@ def _archive_options_text() -> str:
 def _editor_options_text() -> str:
     return "\n".join(
         [
-            "📝 편집기",
+            "📝 Editor",
             "",
-            "Ctrl+E 또는 📝 편집 버튼에서 설정/메모리 파일을 외부 편집기로 엽니다.",
-            "auto 는 $EDITOR → code → cursor → nano 우선순위로 자동 선택합니다.",
+            "Open settings/memory files in an external editor with Ctrl+E or the edit button.",
+            "auto resolves in this order: $EDITOR -> code -> cursor -> nano.",
         ]
     )
 
 
 def _slim_options_text() -> str:
     lines = [
-        "🪴 /slim 기본값",
+        "🪴 /slim Defaults",
         "",
-        "Claude / Codex 의 /slim 호출과 GccSlim 슬림 버튼 기본값입니다.",
+        "Defaults for Claude/Codex /slim calls and the GccSlim slim button.",
         "",
         "Claude:",
-        "- 기본 모드: strong / medium / weak",
-        "- 번들(묶음) 처리: context 포함 영역을 큰 묶음으로 정리",
-        "- context 비포함 압축본화: cap 밖 영역을 native compact boundary 앞으로 분리",
-        "- 슬림 후 자동 열기",
-        "- 다른 환경으로 보내기",
-        "- 새 탭으로 열기",
-        "- 동적 cap: jsonl 크기를 측정해 1M context 안에 들어가도록 자동 조정",
-        "- 최근 raw 보존 턴: 모드별 마지막 user 턴 원본 보존",
+        "- default mode: strong / medium / weak",
+        "- bundling: condense included-context lines into large bundles",
+        "- non-context compacting: move cap-overflow lines before the native compact boundary",
+        "- auto-open after slim",
+        "- send to another environment",
+        "- open in a new tab",
+        "- dynamic cap: measure jsonl size and auto-fit within 1M context",
+        "- recent raw protected turns: preserve the latest user turns per mode",
         "",
         "Codex:",
-        "- 기본 모드: safe / strong",
-        "- 이전 compact/압축 요약을 새 컨텍스트 앞에 시간순으로 포함",
-        "- 결과 구조: 압축요약 #1..N → 현재 slim 본문 → 최근 raw 보호 턴",
-        "- 모드 요약:",
+        "- default mode: safe / strong",
+        "- include previous compact summaries in chronological order before the new context",
+        "- result structure: compact summaries #1..N -> current slim body -> recent raw protected turns",
+        "- mode summary:",
     ]
     for mode in ("safe", "strong"):
         title, intro = CODEX_SLIM_MODE_LABELS[mode]
         keep = CODEX_SLIM_MODE_DEFAULT_KEEP[mode]
-        lines.append(f"  - {title}: 최근 user 턴 기본 {keep}개 raw 보존. {_help_text_for_text_area(intro)}")
+        lines.append(f"  - {title}: preserves {keep} recent user turns as raw by default. {_help_text_for_text_area(intro)}")
     lines.extend([
-        "- keep: 최근 user 턴 raw 보존 수",
-        "- 이전 압축요약 포함: compacted.payload.message 를 모두 모아 새 컨텍스트에 삽입",
-        "- 원본 보존: slim 복제본 생성",
-        "- 슬림 후 자동 열기",
-        "- 다른 환경으로 보내기",
-        "- 새 탭으로 열기",
+        "- keep: number of recent user turns preserved as raw",
+        "- include previous compact summaries: collect compacted.payload.message values into the new context",
+        "- preserve original: create a slim clone",
+        "- auto-open after slim",
+        "- send to another environment",
+        "- open in a new tab",
         "",
-        "일반 슬림 세부 보존 옵션:",
+        "General slim detail-preservation options:",
     ])
     for mode in ("strong", "medium", "weak"):
         title, intro = SLIM_MODE_LABELS[mode]
@@ -585,24 +590,24 @@ def _slim_options_text() -> str:
     return "\n".join(lines)
 
 
-# ─── 외부 API — 딥검색 워커가 호출 ─────────────────────────────────────
+# ─── External API used by deep-search worker ─────────────────────────────────
 def get_deep_prefs_snapshot() -> dict:
-    """현재 prefs 에서 deep_include_* 5개를 한 번에 읽어 dict 로.
+    """Read all deep_include_* prefs from current prefs as one dict.
 
-    워커 thread 가 메인 prefs 와 비동기로 작업하므로 시작 시점 스냅샷을 사용.
+    Worker threads run asynchronously from main prefs, so use a start-time snapshot.
     """
     from gccfork import pref_get
     return {item["key"]: pref_get(item["key"], item["default"]) for item in DEEP_SEARCH_ITEMS}
 
 
 def get_scannable_text(obj: dict, prefs: dict) -> str:
-    """jsonl 한 라인의 parsed JSON → 매처에 보낼 lowercase 본문 텍스트.
+    """Convert one parsed jsonl object into lowercase body text for the matcher.
 
-    prefs 의 5개 deep_include_* 플래그를 보고:
-      - 그 카테고리가 "포함 OFF" 면 빈 문자열 반환 → 매처가 skip
-      - "포함 ON" 면 해당 본문 텍스트를 lowercase 로 반환
+    Based on the deep_include_* flags:
+      - if a category is disabled, return an empty string so matcher skips it
+      - if enabled, return that category's body text lowercased
 
-    빈 문자열은 곧 "이 라인은 매치 후보 아님" 의 의미.
+    Empty string means this line is not a match candidate.
     """
     if not isinstance(obj, dict):
         return ""
@@ -617,21 +622,21 @@ def get_scannable_text(obj: dict, prefs: dict) -> str:
     if typ == "file-history-snapshot":
         return _full_obj_text(obj) if prefs.get("deep_include_file_history", False) else ""
 
-    # ── 5-a. system / summary / permission-mode 등 메타 타입 ───────────
+    # ── 5-a. metadata types such as system / summary / permission-mode ──────
     if typ in ("system", "summary", "permission-mode", "last-prompt", "custom-title"):
         return _full_obj_text(obj) if prefs.get("deep_include_system_internal", False) else ""
 
-    # ── 5-b. isMeta / isSidechain (user/assistant 라도 메타) ───────────
+    # ── 5-b. isMeta / isSidechain, even on user/assistant messages ─────────
     if obj.get("isMeta") or obj.get("isSidechain"):
         return _full_obj_text(obj) if prefs.get("deep_include_system_internal", False) else ""
 
-    # ── user/assistant — content 블록 단위로 검사 ────────────────────
+    # ── user/assistant: inspect by content block ────────────────────────────
     msg = obj.get("message") or {}
     if not isinstance(msg, dict):
         return ""
     content = msg.get("content")
 
-    # 5-c. user 메시지 중 <command-name> 같은 internal prefix 시작
+    # 5-c. user messages that start with internal prefixes such as <command-name>
     if typ == "user" and isinstance(content, str):
         if not prefs.get("deep_include_system_internal", False):
             stripped = content.lstrip()
@@ -648,12 +653,12 @@ def get_scannable_text(obj: dict, prefs: dict) -> str:
                 continue
             bt = b.get("type")
             if bt == "text":
-                # 실제 사용자/어시스턴트 본문 — 항상 포함
+                # Real user/assistant body text is always included.
                 t = b.get("text")
                 if isinstance(t, str):
                     parts.append(t)
             elif bt == "tool_use":
-                # 4. tool_use 인자 (command/path/...)
+                # 4. tool_use arguments such as command/path.
                 if prefs.get("deep_include_tool_use_args", False):
                     name = b.get("name")
                     if isinstance(name, str):
@@ -665,7 +670,7 @@ def get_scannable_text(obj: dict, prefs: dict) -> str:
                         except (TypeError, ValueError):
                             parts.append(str(inp))
             elif bt == "tool_result":
-                # 3. tool_result 본문 (ls/find/git/cat 출력)
+                # 3. tool_result body such as ls/find/git/cat output.
                 if prefs.get("deep_include_tool_result", False):
                     tr = b.get("content")
                     if isinstance(tr, str):
@@ -677,7 +682,7 @@ def get_scannable_text(obj: dict, prefs: dict) -> str:
                                 if isinstance(t, str):
                                     parts.append(t)
             elif bt == "thinking":
-                # 5-d. thinking 블록 — system/internal 토글에 묶음
+                # 5-d. thinking blocks are controlled by the system/internal toggle.
                 if prefs.get("deep_include_system_internal", False):
                     th = b.get("thinking")
                     if isinstance(th, str):
@@ -687,30 +692,30 @@ def get_scannable_text(obj: dict, prefs: dict) -> str:
 
 
 def _full_obj_text(obj: dict) -> str:
-    """체크박스가 켜진 카테고리 — 라인 전체 raw json 을 lowercase 로 (옛 워커 동작)."""
+    """Return full raw json lowercased for enabled categories, matching old worker behavior."""
     try:
         return json.dumps(obj, ensure_ascii=False).lower()
     except (TypeError, ValueError):
         return str(obj).lower()
 
 
-# ─── SettingsScreen 모달 ────────────────────────────────────────────────
+# ─── SettingsScreen modal ───────────────────────────────────────────────────
 class SettingsScreen(ModalScreen[None]):
-    """⚙ gccfork 설정 — 슬림 모달과 동일한 디자인 톤 + 3-탭 분리.
+    """gccfork settings modal with the same visual tone as the slim modal.
 
-    레이아웃 (슬림 모달 패턴 그대로):
+    Layout follows the slim modal pattern:
       ┌─ #settings-box (round $accent 50%) ─────────────┐
-      │ ┌─ #settings-header (좌 brand · 중 ⚙ 설정 · 우 v)│
-      │ ├─ #settings-tabs ([🔬 검색] [🔻 슬림] [❓ 도움말])│
+      │ ┌─ #settings-header (brand left, title center, version right)
+      │ ├─ #settings-tabs ([Search] [Slim] [Help])
       │ ├─ #settings-content                             │
-      │ │   ─ #pane-search   : 탭 내부 스크롤            │
-      │ │   ─ #pane-slim     : 탭 내부 스크롤            │
-      │ │   ─ #pane-help     : TextArea 직접 스크롤/선택 │
-      │ └─ #settings-btn-row (· N개 변경 · spacer · 닫기)│
+      │ │   ─ #pane-search   : scrolls inside the tab
+      │ │   ─ #pane-slim     : scrolls inside the tab
+      │ │   ─ #pane-help     : TextArea direct scroll/select
+      │ └─ #settings-btn-row (changed count, spacer, close)
       └────────────────────────────────────────────────┘
 
-    탭 전환 — 클릭 시 활성 탭만 display=True, 나머지 False.
-    슬림 탭의 모드 전환 — ModeCard 클릭 시 _select_mode() (슬림 모달과 호환).
+    Tab switching displays only the active tab.
+    Slim mode switching uses ModeCard clicks and _select_mode(), matching the slim modal.
     """
     BINDINGS = [
         Binding("escape", "close", "닫기", show=False),
@@ -739,7 +744,7 @@ class SettingsScreen(ModalScreen[None]):
             SelectableTextArea,
         )
 
-        # 섹션 dict 캐시 — id → section
+        # Cache section dicts by id.
         sections = {s.get("id", ""): s for s in get_settings_sections()}
         deep_section = sections.get("deep-search", {})
         help_section = sections.get("help", {})
@@ -750,42 +755,41 @@ class SettingsScreen(ModalScreen[None]):
         }
 
         with Vertical(id="settings-box"):
-            # ── 헤더 ───────────────────────────────────────────────
+            # ── Header ─────────────────────────────────────────────────────
             with Horizontal(id="settings-header"):
                 yield Static("[b]GccForK[/]", id="settings-brand", markup=True)
-                yield Static("[b]⚙ 설정[/]", id="settings-title", markup=True)
+                yield Static(f"[b]{tr('settings.title', '⚙ Settings')}[/]", id="settings-title", markup=True)
                 yield Static(
                     f"[dim]v{GCCFORK_VERSION}[/]",
                     id="settings-meta", markup=True,
                 )
 
-            # ── Scope 토글 제거 (2026-05-08) ────────────────────────
-            # gccfork 는 항상 프로젝트 cwd 에서 띄우므로 "전역 vs 프로젝트"
-            # 선택은 사용자에게 의미가 없음 — 모든 prefs 는 자동으로
-            # <cwd>/.gccfork/ccfork-prefs.json 에 저장됨 (Policy B).
-            # backend (set_active_pref_scope) 는 그대로 두되 default="project"
-            # 로 강제. 토글 UI 만 제거.
+            # ── Scope toggle removed on 2026-05-08 ─────────────────────────
+            # gccfork always launches from a project cwd, so a global/project
+            # choice is not meaningful to users. All prefs automatically save to
+            # <cwd>/.gccfork/ccfork-prefs.json under Policy B. Backend support is
+            # kept with default="project"; only the UI toggle is removed.
 
-            # ── 탭바 ───────────────────────────────────────────────
+            # ── Tab bar ───────────────────────────────────────────────────
             with Horizontal(id="settings-tabs"):
-                yield Button("검색", id="tab-search", classes="settings-tab -active")
-                yield Button("슬림", id="tab-slim", classes="settings-tab")
-                yield Button("병합", id="tab-archive", classes="settings-tab")
-                yield Button("편집", id="tab-editor", classes="settings-tab")
-                yield Button("권고", id="tab-advisor", classes="settings-tab")
-                yield Button("도움", id="tab-help", classes="settings-tab")
+                yield Button(tr("settings.tabs.search", "Search"), id="tab-search", classes="settings-tab -active")
+                yield Button(tr("settings.tabs.slim", "Slim"), id="tab-slim", classes="settings-tab")
+                yield Button(tr("settings.tabs.merge", "Merge"), id="tab-archive", classes="settings-tab")
+                yield Button(tr("settings.tabs.edit", "Edit"), id="tab-editor", classes="settings-tab")
+                yield Button(tr("settings.tabs.guide", "Guide"), id="tab-advisor", classes="settings-tab")
+                yield Button(tr("settings.tabs.help", "Help"), id="tab-help", classes="settings-tab")
 
-            # ── 본문 — 탭별 viewport (공통 부모 스크롤 금지) ────────
+            # ── Body: each tab owns its own viewport; no shared parent scroll. ─
             with Vertical(id="settings-content"):
-                # ─── 검색 pane ────────────────────────────────────
+                # ─── Search pane ───────────────────────────────────────────
                 with VerticalScroll(id="pane-search", classes="settings-pane settings-pane-scroll"):
                     yield Static(
-                        deep_section.get("title", "🔬 딥검색"),
+                        deep_section.get("title", "🔬 Deep Search"),
                         classes="settings-pane-title", markup=True,
                     )
                     yield SelectableTextArea(
                         _settings_items_text(
-                            deep_section.get("title", "🔬 딥검색"),
+                            deep_section.get("title", "🔬 Deep Search"),
                             deep_section.get("intro"),
                             deep_section.get("items", []),
                         ),
@@ -817,17 +821,17 @@ class SettingsScreen(ModalScreen[None]):
                                 )
                     with Horizontal(classes="settings-section-actions"):
                         yield Button(
-                            "↻ 디폴트로",
+                            "↻ Reset to defaults",
                             id="btn-reset-deep-search",
                             classes="settings-reset-btn",
                         )
 
-                # ─── 슬림 pane ────────────────────────────────────
+                # ─── Slim pane ─────────────────────────────────────────────
                 with VerticalScroll(id="pane-slim", classes="settings-pane settings-pane-scroll"):
-                    # ─── /slim 기본값 — Claude / Codex 별도 기본값 ─────
+                    # ─── /slim defaults, separated for Claude and Codex ───────
                     with Horizontal(classes="settings-pane-head"):
                         yield Static(
-                            "[b]🪴 /slim 기본값[/]  [dim]· Claude / Codex 호출 시 자동 적용[/]",
+                            "[b]🪴 /slim Defaults[/]  [dim]· automatically applied to Claude / Codex calls[/]",
                             classes="settings-pane-title", markup=True,
                         )
                         yield Static("", classes="settings-spacer")
@@ -848,13 +852,13 @@ class SettingsScreen(ModalScreen[None]):
 
                     with Vertical(id="slim-pane-claude", classes="settings-slim-subpane"):
                         yield Static(
-                            "claude 의 `/slim` 명령은 옵션 없이 gccfork 에 위임. "
-                            "아래 항목은 슬림 버튼 모달의 기본 선택값과 같은 의미입니다.",
+                            "Claude's `/slim` command delegates to gccfork without extra options. "
+                            "The items below match the default selections in the slim button modal.",
                             classes="settings-intro", markup=True,
                         )
                         cur_def_mode = str(pref_get("slim_default_mode", "strong"))
                         yield Static(
-                            "[b]기본 모드[/]",
+                            "[b]Default mode[/]",
                             classes="settings-radio-label", markup=True,
                         )
                         with RadioSet(id="rs-slim_default_mode", classes="settings-radioset"):
@@ -866,109 +870,108 @@ class SettingsScreen(ModalScreen[None]):
                                     classes="settings-radio",
                                 )
                         yield Static(
-                            "[b]적용 구조[/]\n"
-                            "전체 세션\n"
-                            "├─ 압축본 / archive        보존\n"
-                            "└─ active 영역\n"
-                            "   ├─ context 비포함       압축본화\n"
-                            "   └─ context 포함         bundle 대상\n"
-                            "      └─ 최근 N턴 raw      원본 보존",
+                            "[b]Application structure[/]\n"
+                            "Full session\n"
+                            "├─ compact summaries / archive   preserved\n"
+                            "└─ active region\n"
+                            "   ├─ non-context region         compacted\n"
+                            "   └─ context-included region    bundled\n"
+                            "      └─ latest N raw turns      preserved as raw",
                             classes="settings-intro",
                             markup=True,
                         )
-                        # [모달과 동일 순서 + 동일 단어]
-                        # 1) 번들(묶음) 처리
+                        # Same order and wording as the modal.
+                        # 1) Bundling.
                         cur_anti_frag = bool(pref_get("slim_default_anti_fragmentation", True))
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "번들(묶음) 처리 (context 포함 영역을 큰 묶음으로 정리)",
+                                "Bundle processing (condense included-context region into larger bundles)",
                                 value=cur_anti_frag,
                                 id="chk-slim_default_anti_fragmentation",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ 옛 turn 들을 bundle 구조로 묶어서 in-place 적용. "
-                                "context 포함 영역을 정리하고 마지막 N user 턴은 raw 그대로 보존.",
+                                "↳ Applies in-place by grouping old turns into bundle structures. "
+                                "Cleans the context-included region while preserving the latest N user turns raw.",
                                 classes="settings-item-hint",
                             )
 
-                        # 2) context 비포함 압축본화 — 모달은 cap_overflow 시에만 보이지만,
-                        #    설정은 디폴트 정책이므로 항상 노출.
+                        # 2) Non-context compacting. The modal shows this only on
+                        # cap_overflow, but settings expose the default policy always.
                         cur_cap_compact = bool(pref_get("slim_default_visible_cap_compact", True))
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "context 비포함 압축본화 (cap 밖)",
+                                "Compact non-context region (outside cap)",
                                 value=cur_cap_compact,
                                 id="chk-slim_default_visible_cap_compact",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ Claude Code cap (~230 메시지) 밖의 context 비포함 영역을 "
-                                "native compact boundary 앞으로 분리. raw 는 jsonl 에 그대로 보존.",
+                                "↳ Moves the non-context region outside the Claude Code cap (~230 messages) "
+                                "before the native compact boundary. Raw data remains in jsonl.",
                                 classes="settings-item-hint",
                             )
 
-                        # 3) 슬림 후 자동 열기  (= hot-reload 의 사용자 친화 단어)
+                        # 3) Auto-open after slim, a user-facing name for hot reload.
                         cur_def_reload = bool(pref_get("slim_default_reload", True))
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "슬림 후 자동 열기",
+                                "Auto-open after slim",
                                 value=cur_def_reload,
                                 id="chk-slim_default_reload",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ slim 후 같은 sid 를 새 터미널/탭으로 자동 resume. "
-                                "끄면 disk 만 슬림 → 다음 재개 때 적용.",
+                                "↳ Automatically resumes the same sid in a new terminal/tab after slim. "
+                                "If off, only slims on disk and applies on the next resume.",
                                 classes="settings-item-hint",
                             )
 
-                        # 3-└) 다른 환경으로 보내기 (디폴트 토글) — 모달의 "└ VSCode 로 보내기" 와 동격
+                        # 3-└) Send to another environment; equivalent to modal's environment-specific send option.
                         cur_other_env = bool(pref_get("slim_default_send_other_env", False))
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "    └ 다른 환경으로 보내기 (VSCode / gnome-terminal)",
+                                "    └ Send to another environment (VSCode / gnome-terminal)",
                                 value=cur_other_env,
                                 id="chk-slim_default_send_other_env",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ 자동 열기 ON 일 때 활성. 모달에서는 \"VSCode 로 보내기\" 처럼 "
-                                "현재 감지된 다른 환경 이름이 표시됨.",
+                                "↳ Enabled when auto-open is on. The modal shows the currently detected environment name.",
                                 classes="settings-item-hint",
                             )
 
-                        # 3-└) 새 탭으로 열기 (디폴트 토글)
+                        # 3-└) Open in a new tab.
                         cur_newtab = bool(pref_get("slim_default_newtab", False))
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "    └ 새 탭으로 열기 (해제 = 새 창)",
+                                "    └ Open in a new tab (unchecked = new window)",
                                 value=cur_newtab,
                                 id="chk-slim_default_newtab",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ 자동 열기 ON + VSCode 아닐 때 활성.",
+                                "↳ Enabled when auto-open is on and the target is not VSCode.",
                                 classes="settings-item-hint",
                             )
 
-                        # 4) 동적 cap — 모달에는 없고 설정 전용 (시스템 자동 정책)
+                        # 4) Dynamic cap, settings-only automatic policy.
                         cur_dyn_cap = bool(pref_get("slim_default_dynamic_cap", True))
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "📏 동적 cap (jsonl 크기 측정 → 1M context 안에 들어가도록 자동 조정)",
+                                "📏 Dynamic cap (measure jsonl size and auto-fit within 1M context)",
                                 value=cur_dyn_cap,
                                 id="chk-slim_default_dynamic_cap",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ 큰 세션은 trim cap 자동 축소, 작은 세션은 raw 보존. "
-                                "번들(묶음) 처리 ON 일 때만 적용. OFF 면 모드별 고정 cap (200/500/1000). "
-                                "모달엔 노출 안 됨 (시스템 자동 정책).",
+                                "↳ Large sessions automatically shrink trim cap; small sessions preserve raw. "
+                                "Applies only when bundle processing is ON. If OFF, mode-specific fixed caps apply (200/500/1000). "
+                                "Not exposed in the modal because this is an automatic system policy.",
                                 classes="settings-item-hint",
                             )
                         yield Static(
-                            "[b]최근 raw 보존 턴[/]",
+                            "[b]Recent raw protected turns[/]",
                             classes="settings-radio-label", markup=True,
                         )
                         for mode in ("strong", "medium", "weak"):
@@ -988,32 +991,32 @@ class SettingsScreen(ModalScreen[None]):
                                     classes="settings-input",
                                 )
                                 yield Static(
-                                    "user 턴 raw 보존",
+                                    "user turns preserved raw",
                                     classes="settings-item-hint",
                                 )
                         yield Static(
-                            "↳ user 메시지 기준. 이 값만큼 마지막 대화 흐름을 raw 로 보존.",
+                            "↳ Counted by user messages. Preserves this much of the latest conversation flow as raw.",
                             classes="settings-item-hint",
                         )
                         with Horizontal(classes="settings-section-actions"):
                             yield Button(
-                                "↻ /slim 기본값 디폴트로",
+                                "↻ Reset /slim defaults",
                                 id="btn-reset-slim-defaults",
                                 classes="settings-reset-btn",
                             )
 
                         yield Button(
-                            "▶ 일반 슬림 세부 보존 옵션",
+                            "▶ General slim detail-preservation options",
                             id="btn-toggle-slim-advanced",
                             classes="settings-reset-btn",
                         )
                         with Vertical(id="slim-advanced-pane", classes="settings-slim-sub"):
                             yield Static(
-                                "[b][고급][/] 일반 슬림 세부 보존 옵션",
+                                "[b][Advanced][/] General slim detail-preservation options",
                                 classes="settings-pane-title", markup=True,
                             )
                             yield Static(
-                                "번들(묶음) 처리를 끄거나 일반 슬림 경로를 쓸 때 의미 있는 옛 세부 옵션입니다.",
+                                "Legacy detail options that matter when bundle processing is off or the general slim path is used.",
                                 classes="settings-intro",
                             )
                             with Horizontal(id="settings-slim-mode-row"):
@@ -1021,7 +1024,7 @@ class SettingsScreen(ModalScreen[None]):
                                     sec = slim_sections.get(mode, {})
                                     mode_title = sec.get("title", mode)
                                     mode_intro = sec.get("intro", "").split("\n")[0]
-                                    badge = " [b](기본)[/]" if mode == "strong" else ""
+                                    badge = " [b](default)[/]" if mode == "strong" else ""
                                     card = ModeCard(
                                         f"[b]{mode_title}[/]{badge}\n[dim]{mode_intro[:48]}[/]",
                                         id=f"setting-mode-{mode}",
@@ -1032,7 +1035,7 @@ class SettingsScreen(ModalScreen[None]):
                                         card.add_class("-selected")
                                     yield card
 
-                            # 선택 모드의 5체크박스 — 모드별 sub-pane (display 토글)
+                            # Five checkboxes for the selected mode, one display-toggled subpane per mode.
                             for mode in ("strong", "medium", "weak"):
                                 sec = slim_sections.get(mode, {})
                                 with Vertical(
@@ -1059,7 +1062,7 @@ class SettingsScreen(ModalScreen[None]):
                                                 )
                                     with Horizontal(classes="settings-section-actions"):
                                         yield Button(
-                                            "↻ 이 모드 디폴트로",
+                                            "↻ Reset this mode",
                                             id=f"btn-reset-slim-{mode}",
                                             classes="settings-reset-btn",
                                         )
@@ -1067,14 +1070,14 @@ class SettingsScreen(ModalScreen[None]):
 
                     with Vertical(id="slim-pane-codex", classes="settings-slim-subpane"):
                         yield Static(
-                            "codex TUI 의 `/slim` 명령과 GccSlim Codex 슬림 버튼 기본값입니다. "
-                            "Codex wrapper가 현재 프로젝트의 .gccfork/ccfork-prefs.json 값을 읽어 적용합니다.",
+                            "Defaults for the Codex TUI `/slim` command and the GccSlim Codex slim button. "
+                            "The Codex wrapper reads the current project's .gccfork/ccfork-prefs.json.",
                             classes="settings-intro", markup=True,
                         )
                         cur_codex_mode = str(pref_get("codex_slim_default_mode", "strong"))
                         if cur_codex_mode not in CODEX_SLIM_MODE_LABELS:
                             cur_codex_mode = "strong"
-                        yield Static("[b]기본 모드[/]", classes="settings-radio-label", markup=True)
+                        yield Static("[b]Default mode[/]", classes="settings-radio-label", markup=True)
                         with RadioSet(id="rs-codex_slim_default_mode", classes="settings-radioset"):
                             for m in ("safe", "strong"):
                                 yield RadioButton(
@@ -1084,12 +1087,12 @@ class SettingsScreen(ModalScreen[None]):
                                     classes="settings-radio",
                                 )
                         with Vertical(classes="settings-checkbox-row"):
-                            yield Static("[b]모드 요약[/]", classes="settings-radio-label", markup=True)
+                            yield Static("[b]Mode summary[/]", classes="settings-radio-label", markup=True)
                             for m in ("safe", "strong"):
                                 title, intro = CODEX_SLIM_MODE_LABELS[m]
                                 keep = CODEX_SLIM_MODE_DEFAULT_KEEP[m]
                                 yield Static(
-                                    f"[b]{title}[/]  [dim]최근 user 턴 기본 {keep}개 raw 보존[/]\n"
+                                    f"[b]{title}[/]  [dim]preserves {keep} recent user turns as raw by default[/]\n"
                                     f"   {intro}",
                                     classes="settings-item-hint",
                                     markup=True,
@@ -1102,60 +1105,95 @@ class SettingsScreen(ModalScreen[None]):
                                 type="integer",
                                 classes="settings-input",
                             )
-                            yield Static("최근 user 턴 raw 보존", classes="settings-item-hint")
+                            yield Static("recent user turns preserved raw", classes="settings-item-hint")
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "이전 compact/압축 요약을 새 컨텍스트에 포함",
+                                "Include previous compact summaries in the new context",
                                 value=bool(pref_get("codex_slim_include_compact_summaries", True)),
                                 id="chk-codex_slim_include_compact_summaries",
                                 classes="settings-checkbox",
                             )
                             yield Static(
-                                "↳ 3번 압축됐다면 요약 #1, #2, #3을 시간순으로 모아 현재 slim 본문 앞에 넣습니다.",
+                                "↳ If compacted three times, summaries #1, #2, and #3 are collected chronologically before the current slim body.",
                                 classes="settings-item-hint",
                             )
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "원본 보존: slim 복제본 생성",
+                                "Trim tool calls/results even inside recent raw protected turns",
+                                value=bool(pref_get("codex_slim_trim_recent_tools", True)),
+                                id="chk-codex_slim_trim_recent_tools",
+                                classes="settings-checkbox",
+                            )
+                            yield Static(
+                                "↳ Recent conversation text remains raw; old tool outputs, token logs, and internal plumbing rows are removed.",
+                                classes="settings-item-hint",
+                            )
+                        with Horizontal(classes="settings-turn-row"):
+                            yield Static("compact event types +", classes="settings-radio-label")
+                            yield Input(
+                                value=str(pref_get("codex_slim_compact_event_types", "") or ""),
+                                id="input-codex_slim_compact_event_types",
+                                classes="settings-input",
+                                placeholder="comma-separated extra event types",
+                            )
+                        yield Static(
+                            "↳ Defaults already include context_compacted, compact_summary, conversation_compacted, auto_compacted.",
+                            classes="settings-item-hint",
+                        )
+                        with Horizontal(classes="settings-turn-row"):
+                            yield Static("compact text keys +", classes="settings-radio-label")
+                            yield Input(
+                                value=str(pref_get("codex_slim_compact_text_keys", "") or ""),
+                                id="input-codex_slim_compact_text_keys",
+                                classes="settings-input",
+                                placeholder="comma-separated extra text keys",
+                            )
+                        yield Static(
+                            "↳ Defaults already include message, summary, text, content, compact_summary.",
+                            classes="settings-item-hint",
+                        )
+                        with Vertical(classes="settings-checkbox-row"):
+                            yield Checkbox(
+                                "Preserve original: create a slim clone",
                                 value=bool(pref_get("codex_slim_default_clone", False)),
                                 id="chk-codex_slim_default_clone",
                                 classes="settings-checkbox",
                             )
-                            yield Static("↳ ON이면 원본 JSONL은 그대로 두고 slim된 새 Codex SID를 만듭니다.", classes="settings-item-hint")
+                            yield Static("↳ When ON, keeps the original JSONL and creates a new slim Codex SID.", classes="settings-item-hint")
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "슬림 후 자동 열기",
+                                "Auto-open after slim",
                                 value=bool(pref_get("codex_slim_default_reload", True)),
                                 id="chk-codex_slim_default_reload",
                                 classes="settings-checkbox",
                             )
-                            yield Static("↳ 활성 wrapper 세션이면 같은 터미널 재시작 marker를 사용합니다.", classes="settings-item-hint")
+                            yield Static("↳ For active wrapper sessions, uses the same-terminal restart marker.", classes="settings-item-hint")
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "    └ 다른 환경으로 보내기 (VSCode / gnome-terminal)",
+                                "    └ Send to another environment (VSCode / gnome-terminal)",
                                 value=bool(pref_get("codex_slim_default_send_other_env", False)),
                                 id="chk-codex_slim_default_send_other_env",
                                 classes="settings-checkbox",
                             )
                         with Vertical(classes="settings-checkbox-row"):
                             yield Checkbox(
-                                "    └ 새 탭으로 열기 (해제 = 새 창)",
+                                "    └ Open in a new tab (unchecked = new window)",
                                 value=bool(pref_get("codex_slim_default_newtab", False)),
                                 id="chk-codex_slim_default_newtab",
                                 classes="settings-checkbox",
                             )
                         with Horizontal(classes="settings-section-actions"):
                             yield Button(
-                                "↻ Codex /slim 기본값 디폴트로",
+                                "↻ Reset Codex /slim defaults",
                                 id="btn-reset-codex-slim-defaults",
                                 classes="settings-reset-btn",
                             )
 
-                # ─── 🗂 병합 pane — 진짜 RadioSet/Checkbox UI ────────
+                # ─── Merge pane with real RadioSet/Checkbox UI ──────────────
                 with VerticalScroll(id="pane-archive", classes="settings-pane settings-pane-scroll"):
                     with Horizontal(classes="settings-pane-head"):
                         yield Static(
-                            "[b]🗂 Archive (병합) — 옵션 10개[/]",
+                            "[b]🗂 Archive / Merge — Options[/]",
                             classes="settings-pane-title", markup=True,
                         )
                         yield Static("", classes="settings-spacer")
@@ -1171,10 +1209,10 @@ class SettingsScreen(ModalScreen[None]):
                         highlight_cursor_line=True,
                     )
                     yield Static(
-                        "변경 즉시 prefs 에 저장 + 다음 archive 작업부터 적용.",
+                        "Changes are saved to prefs immediately and apply from the next archive operation.",
                         classes="settings-intro",
                     )
-                    # 사이드카 import — archive + merge defaults 합치기
+                    # Sidecar imports; combine archive and merge defaults.
                     try:
                         from gccfork_archive import ARCHIVE_DEFAULTS
                     except ImportError:
@@ -1220,15 +1258,15 @@ class SettingsScreen(ModalScreen[None]):
                                     )
                     with Horizontal(classes="settings-section-actions"):
                         yield Button(
-                            "↻ 모두 디폴트로",
+                            "↻ Reset all to defaults",
                             id="btn-reset-archive",
                             classes="settings-reset-btn",
                         )
 
-                # ─── 📝 편집기 pane — config_editor RadioSet ─────
+                # ─── Editor pane: config_editor RadioSet ───────────────────
                 with VerticalScroll(id="pane-editor", classes="settings-pane settings-pane-scroll"):
                     yield Static(
-                        "[b]📝 편집기 — Ctrl+E 또는 📝 편집 버튼[/]",
+                        "[b]📝 Editor — Ctrl+E or edit button[/]",
                         classes="settings-pane-title", markup=True,
                     )
                     yield SelectableTextArea(
@@ -1242,7 +1280,7 @@ class SettingsScreen(ModalScreen[None]):
                         highlight_cursor_line=True,
                     )
                     yield Static(
-                        "설정/메모리 파일 (CLAUDE.md, MEMORY.md 등) 을 클릭으로 외부 편집기 spawn.",
+                        "Click settings/memory files such as CLAUDE.md or MEMORY.md to spawn an external editor.",
                         classes="settings-intro",
                     )
                     try:
@@ -1253,16 +1291,16 @@ class SettingsScreen(ModalScreen[None]):
                         resolve_editor = None
                     cur_editor = pref_get("config_editor", EDITOR_DEFAULT)
                     yield Static(
-                        "[b]편집기 선택[/]",
+                        "[b]Editor selection[/]",
                         classes="settings-radio-label", markup=True,
                     )
                     yield Static(
-                        "↳ auto = $EDITOR → code → cursor → nano 우선순위 자동",
+                        "↳ auto resolves in this order: $EDITOR -> code -> cursor -> nano",
                         classes="settings-item-hint",
                     )
                     with RadioSet(id="rs-config_editor", classes="settings-radioset"):
                         for value in [EDITOR_DEFAULT] + EDITOR_CANDIDATES:
-                            label = f"{value} (자동 우선순위)" if value == EDITOR_DEFAULT else value
+                            label = f"{value} (automatic priority)" if value == EDITOR_DEFAULT else value
                             yield RadioButton(
                                 label,
                                 value=(str(cur_editor) == value),
@@ -1271,28 +1309,59 @@ class SettingsScreen(ModalScreen[None]):
                             )
                     if resolve_editor is not None:
                         eff, reason = resolve_editor()
-                        eff_text = f"현재 적용: [b]{eff or '(없음)'}[/]  [dim]· {reason}[/]"
+                        eff_text = f"Current effective editor: [b]{eff or '(none)'}[/]  [dim]· {reason}[/]"
                         yield Static(eff_text, classes="settings-intro", markup=True)
                     with Horizontal(classes="settings-section-actions"):
                         yield Button(
-                            "↻ auto 로 복원",
+                            "↻ Restore auto",
                             id="btn-reset-editor",
                             classes="settings-reset-btn",
                         )
 
-                # ─── 권고 설치 pane ────────────────────────────────
-                # 5개 카드 (cleanup / stale / Claude /slim / Codex / dingdong).
-                # 자동 안내 모달을 dismiss 하거나 놓친 사용자가 언제든
-                # 재방문/재설치 할 수 있는 진입점.
-                # 카드 본문은 SelectableTextArea — 마우스 드래그로 선택/복사 가능.
+                # ─── Recommended install pane ──────────────────────────────
+                # Cards for cleanup, stale instances, Claude/Codex /slim, and dingdong.
+                # Users who dismissed or missed the automatic guide modal can revisit
+                # and reinstall from here. Card bodies use SelectableTextArea so mouse
+                # drag selection/copy works.
                 with VerticalScroll(id="pane-advisor", classes="settings-pane settings-pane-scroll"):
                     yield Static(
-                        "[b]🪴 권고 설치 옵션[/]  [dim]· Claude · Codex · 알림음[/]",
+                        f"[b]{tr('settings.advisor.title', '🪴 Recommended 설치 Options')}[/]  "
+                        f"[dim]· {tr('settings.advisor.subtitle', 'Claude · Codex · notifications')}[/]",
                         classes="settings-pane-title", markup=True,
                     )
+                    yield Static(tr("settings.language.title", "🌐 Language"), classes="settings-radio-label", markup=True)
                     yield SelectableTextArea(
-                        "권고 설치 옵션입니다. 내부 검사는 자동으로 처리하며, "
-                        "필요한 항목만 설치하거나 제거할 수 있습니다.",
+                        tr(
+                            "settings.language.intro",
+                            "Choose the UI language for GccSlim. The setting is stored in the current project's .gccfork preferences when project prefs are active.",
+                        ),
+                        id="settings-language-intro",
+                        classes="settings-select-text advisor-intro-text",
+                        read_only=True,
+                        soft_wrap=True,
+                        compact=True,
+                        show_line_numbers=False,
+                        highlight_cursor_line=True,
+                    )
+                    active_lang = current_language()
+                    with RadioSet(id=f"rs-{LANGUAGE_PREF_KEY}", classes="settings-radioset"):
+                        yield RadioButton(
+                            tr("settings.language.en", "English"),
+                            id=f"rb-{LANGUAGE_PREF_KEY}-en",
+                            value=(active_lang == "en"),
+                            classes="settings-radio",
+                        )
+                        yield RadioButton(
+                            tr("settings.language.ko", "Korean"),
+                            id=f"rb-{LANGUAGE_PREF_KEY}-ko",
+                            value=(active_lang == "ko"),
+                            classes="settings-radio",
+                        )
+                    yield SelectableTextArea(
+                        tr(
+                            "settings.advisor.intro",
+                            "권고 설치 옵션입니다. 내부 검사는 자동으로 처리하며, 필요한 항목만 설치하거나 제거할 수 있습니다.",
+                        ),
                         id="advisor-intro",
                         classes="settings-select-text advisor-intro-text",
                         read_only=True,
@@ -1303,10 +1372,10 @@ class SettingsScreen(ModalScreen[None]):
                     )
                     yield Vertical(id="advisor-cards-host")
 
-                # ─── 도움말 pane ──────────────────────────────────
+                # ─── Help pane ─────────────────────────────────────────────
                 with Vertical(id="pane-help", classes="settings-pane"):
                     yield Static(
-                        help_section.get("title", "❓ 도움말"),
+                        help_section.get("title", tr("help.title", "❓ Help")),
                         classes="settings-pane-title", markup=True,
                     )
                     yield SelectableTextArea(
@@ -1319,15 +1388,15 @@ class SettingsScreen(ModalScreen[None]):
                         highlight_cursor_line=True,
                     )
 
-            # ── 푸터 — 양 끝 정렬 ─────────────────────────────────
+            # ── Footer, edge-aligned ───────────────────────────────────────
             with Horizontal(id="settings-btn-row"):
                 yield Static("", id="settings-status")
                 yield Static("", id="settings-btn-spacer")
-                yield Button("Esc 닫기", id="btn-settings-close", variant="primary")
+                yield Button(tr("settings.close", "Esc 닫기"), id="btn-settings-close", variant="primary")
         yield CopyMenuOverlay(id="copy-menu")
 
     def on_mount(self) -> None:
-        # 초기 탭 — 검색만 보이고 나머지 숨김
+        # Initial tab: show search and hide the rest.
         self._apply_tab_visibility()
         self._apply_slim_mode_visibility()
         self._apply_slim_subtab_visibility()
@@ -1335,8 +1404,8 @@ class SettingsScreen(ModalScreen[None]):
             self.query_one("#tab-search", Button).focus()
         except Exception:
             pass
-        # 권고 탭 — intro/cards-host 의 height 를 콘텐츠에 맞춰 auto
-        # (그래야 #pane-advisor VerticalScroll 이 정상 스크롤됨).
+        # Advisor tab: set intro/cards-host height to auto so #pane-advisor
+        # VerticalScroll scrolls correctly.
         try:
             self.query_one("#advisor-intro").styles.height = "auto"
         except Exception:
@@ -1362,8 +1431,8 @@ class SettingsScreen(ModalScreen[None]):
             self._refresh_status()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Input 변경 — id="input-{key}" 패턴에서 key 추출 후 pref_set.
-        type=integer 인 input 은 비어있거나 잘못된 값이면 무시 (기본값 보존).
+        """Persist input changes by extracting key from id="input-{key}".
+        Empty or invalid integer inputs are ignored, preserving the previous value.
         """
         iid = event.input.id or ""
         if not iid.startswith("input-"):
@@ -1384,8 +1453,7 @@ class SettingsScreen(ModalScreen[None]):
         self._refresh_status()
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        """RadioSet 변경 — id="rs-{key}" 패턴에서 key 추출, 선택된 RadioButton 의
-        id="rb-{key}-{value}" 에서 value 추출 후 pref_set.
+        """Persist RadioSet changes by extracting key/value from widget ids.
 
         (Scope toggle removed 2026-05-08 — see _compose_scope_toggle comment.)
         """
@@ -1398,6 +1466,14 @@ class SettingsScreen(ModalScreen[None]):
         if not rb_id.startswith(prefix):
             return
         value = rb_id[len(prefix):]
+        if key == LANGUAGE_PREF_KEY:
+            lang = set_language_pref(value)
+            self.notify(
+                tr("settings.language.changed", "Language -> {language}. Reopen the settings window to refresh all labels.", language=lang),
+                severity="information",
+            )
+            self._refresh_status()
+            return
         from gccfork import pref_set
         pref_set(key, value)
         self._refresh_status()
@@ -1430,7 +1506,7 @@ class SettingsScreen(ModalScreen[None]):
     def action_switch_tab(self, tab: str) -> None:
         self._select_tab(tab)
 
-    # ─── 탭 전환 ────────────────────────────────────────────────────
+    # ─── Tab switching ──────────────────────────────────────────────────────
     def _select_tab(self, tab: str) -> None:
         if tab not in ("search", "slim", "archive", "editor", "advisor", "help"):
             return
@@ -1477,12 +1553,12 @@ class SettingsScreen(ModalScreen[None]):
             except Exception:
                 pass
 
-    # ─── 슬림 모드 전환 (ModeCard 가 호출) ───────────────────────────
+    # ─── Slim mode switching, called by ModeCard ────────────────────────────
     def _select_mode(self, mode: str) -> None:
         if mode not in ("strong", "medium", "weak"):
             return
         self._slim_mode = mode
-        # 카드 .-selected 토글
+        # Toggle the card .-selected class.
         for m in ("strong", "medium", "weak"):
             try:
                 card = self.query_one(f"#setting-mode-{m}")
@@ -1503,9 +1579,9 @@ class SettingsScreen(ModalScreen[None]):
         try:
             btn = self.query_one("#btn-toggle-slim-advanced", Button)
             btn.label = (
-                "▼ 일반 슬림 세부 보존 옵션"
+                "▼ General slim detail-preservation options"
                 if self._slim_advanced_open
-                else "▶ 일반 슬림 세부 보존 옵션"
+                else "▶ General slim detail-preservation options"
             )
         except Exception:
             pass
@@ -1518,52 +1594,52 @@ class SettingsScreen(ModalScreen[None]):
 
     def _slim_settings_system_prompt(self) -> str:
         return (
-            "당신은 GccSlim 설정 화면의 슬림 탭 해설 전용 지능 에이전트입니다.\n"
-            "목표는 사용자가 슬림 설정과 슬림 버튼 모달의 관계를 바로 이해하도록 돕는 것입니다.\n"
-            "GccSlim 슬림이 다루는 Claude Code 세션 구조:\n"
-            "- 세션은 ~/.claude/projects/<cwd-slug>/<sid>.jsonl 의 JSONL 파일입니다.\n"
-            "- Claude Code 는 native compact marker(isCompactSummary / compact_boundary) 이후의 대화만 주로 컨텍스트로 재구성합니다.\n"
-            "- 추가로 user/assistant 메시지 개수 cap 이 있어, 1M 토큰이 비어 있어도 오래된 active 메시지는 컨텍스트에 안 들어갈 수 있습니다.\n"
-            "- 기존 압축본/archive 는 raw JSONL 에 남아 있지만 native compact boundary 앞 영역이라 일반 resume 컨텍스트에는 직접 들어가지 않는 영역입니다.\n"
-            "- active 영역은 마지막 native compact marker 뒤의 원본 대화입니다.\n"
-            "- context 비포함은 active 안에 있지만 Claude 메시지 cap 밖이라 현재 컨텍스트에 들어가지 않는 구간입니다.\n"
-            "- context 포함은 현재 cap 안에 들어오는 active 구간이며 bundle 처리 대상입니다.\n"
-            "- 최근 raw 보존 턴은 사용자가 방금 보던 마지막 흐름이므로 JSONL 라인을 원본 그대로 보존합니다.\n"
-            "슬림 적용 구조:\n"
-            "- 압축본/archive: 보존\n"
-            "- context 비포함: native compact boundary 앞으로 분리해서 컨텍스트 밖으로 둠\n"
-            "- context 포함: bundle 로 묶어 컨텍스트 부담을 줄임\n"
-            "- 최근 N턴 raw: 원본 그대로 보존\n"
-            "모드 의미:\n"
-            "- strong: context 확보 우선. 가장 강하게 줄이고 최근 raw 기본 5턴만 보존합니다.\n"
-            "- medium: 균형형. 흐름 가독성과 절감 사이 절충, 최근 raw 기본 10턴 보존입니다.\n"
-            "- weak: 보수형. 더 많이 보존하고 절감은 작으며, 최근 raw 기본 30턴 보존입니다.\n"
-            "Codex 모드 의미:\n"
-            "- safe: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 10턴을 보존합니다. 복구/검토 우선입니다.\n"
-            "- strong: 이전 compact 요약 전부, 현재 slim 본문, 최근 raw 3턴만 보존합니다. 컨텍스트 확보 우선입니다.\n"
-            "Codex slim 결과 구조:\n"
-            "- compacted.payload.message 요약 #1..N\n"
-            "- 현재 세션의 slim 본문\n"
-            "- 최근 raw 보호 턴\n"
-            "설명 규칙:\n"
-            "- 한국어로 답합니다.\n"
-            "- 현재 설정값만 근거로 설명합니다.\n"
-            "- 기본 설정과 고급 설정을 구분합니다.\n"
-            "- 'context 비포함 압축본화'는 raw 삭제가 아니라 native compact boundary 앞으로 분리하는 정책이라고 설명합니다.\n"
-            "- '번들(묶음) 처리'와 '최근 raw 보존 턴'이 실제 슬림 실행에 어떤 영향을 주는지 짧게 설명합니다.\n"
-            "- 마지막에 사용자가 보통 유지해야 할 추천값을 한 줄로 제시합니다."
+            "You are an AI explainer dedicated to the Slim tab in the GccSlim settings screen.\n"
+            "Your goal is to help the user quickly understand how slim settings relate to the slim button modal.\n"
+            "Claude Code session structure handled by GccSlim slim:\n"
+            "- Sessions are JSONL files at ~/.claude/projects/<cwd-slug>/<sid>.jsonl.\n"
+            "- Claude Code mainly reconstructs context from conversation after the native compact marker (isCompactSummary / compact_boundary).\n"
+            "- There is also a user/assistant message-count cap, so old active messages may be excluded from context even when the 1M token budget has space.\n"
+            "- Existing compact summaries/archive remain in raw JSONL, but they are before the native compact boundary and are not normally injected into resume context.\n"
+            "- The active region is the raw conversation after the latest native compact marker.\n"
+            "- The non-context region is inside active but outside the Claude message cap.\n"
+            "- The context-included region is inside the current cap and is the bundle target.\n"
+            "- Recent raw protected turns preserve the exact JSONL lines for the last flow the user was viewing.\n"
+            "Slim application structure:\n"
+            "- compact summaries/archive: preserved\n"
+            "- non-context region: moved before native compact boundary, keeping it outside context\n"
+            "- context-included region: bundled to reduce context load\n"
+            "- latest N raw turns: preserved exactly\n"
+            "Mode meanings:\n"
+            "- strong: prioritizes context space; trims most aggressively and preserves 5 recent raw turns by default.\n"
+            "- medium: balanced; trades off flow readability and reduction, preserving 10 recent raw turns by default.\n"
+            "- weak: conservative; preserves more and reduces less, preserving 30 recent raw turns by default.\n"
+            "Codex mode meanings:\n"
+            "- safe: preserves all previous compact summaries, the current slim body, and 10 recent raw turns; prioritizes recovery/review.\n"
+            "- strong: preserves all previous compact summaries, the current slim body, and only 3 recent raw turns; prioritizes context space.\n"
+            "Codex slim result structure:\n"
+            "- compacted.payload.message summaries #1..N\n"
+            "- current session slim body\n"
+            "- recent raw protected turns\n"
+            "Explanation rules:\n"
+            "- Answer in Korean.\n"
+            "- Base the answer only on current settings.\n"
+            "- Distinguish default settings from advanced settings.\n"
+            "- Explain that 'non-context compacting' does not delete raw data; it moves it before the native compact boundary.\n"
+            "- Briefly explain how 'bundle processing' and 'recent raw protected turns' affect actual slim execution.\n"
+            "- End with a one-line recommendation for settings users should usually keep."
         )
 
     def _slim_settings_user_prompt(self) -> str:
         from gccfork import pref_get
         mode = str(pref_get("slim_default_mode", "strong"))
         vals = {
-            "번들(묶음) 처리": bool(pref_get("slim_default_anti_fragmentation", True)),
-            "context 비포함 압축본화": bool(pref_get("slim_default_visible_cap_compact", True)),
-            "슬림 후 자동 열기": bool(pref_get("slim_default_reload", True)),
-            "다른 환경으로 보내기": bool(pref_get("slim_default_send_other_env", False)),
-            "새 탭으로 열기": bool(pref_get("slim_default_newtab", False)),
-            "동적 cap": bool(pref_get("slim_default_dynamic_cap", True)),
+            "bundle processing": bool(pref_get("slim_default_anti_fragmentation", True)),
+            "non-context compacting": bool(pref_get("slim_default_visible_cap_compact", True)),
+            "auto-open after slim": bool(pref_get("slim_default_reload", True)),
+            "send to another environment": bool(pref_get("slim_default_send_other_env", False)),
+            "open in a new tab": bool(pref_get("slim_default_newtab", False)),
+            "dynamic cap": bool(pref_get("slim_default_dynamic_cap", True)),
         }
         turns = {
             m: int(pref_get(f"slim_{m}_keep_recent_turns", SLIM_DEFAULT_PREFS[f"slim_{m}_keep_recent_turns"]) or 5)
@@ -1577,57 +1653,60 @@ class SettingsScreen(ModalScreen[None]):
         option_lines = "\n".join(
             f"- {k}: {'ON' if v else 'OFF'}" for k, v in vals.items()
         )
-        turns_lines = "\n".join(f"- {m}: {n} user 턴 raw 보존" for m, n in turns.items())
+        turns_lines = "\n".join(f"- {m}: {n} user turns preserved raw" for m, n in turns.items())
         return (
-            "GccSlim 설정 화면의 슬림 탭 상태를 사용자에게 설명해줘.\n\n"
-            f"[기본 모드]\n- {mode}\n\n"
-            "[적용 구조]\n"
-            "전체 세션\n"
-            "├─ 압축본 / archive        보존\n"
-            "└─ active 영역\n"
-            "   ├─ context 비포함       압축본화\n"
-            "   └─ context 포함         bundle 대상\n"
-            "      └─ 최근 N턴 raw      원본 보존\n\n"
-            f"[기본 옵션]\n{option_lines}\n\n"
-            f"[최근 raw 보존 턴]\n{turns_lines}\n\n"
-            f"[고급 설정 펼침 상태]\n- {'펼쳐짐' if self._slim_advanced_open else '접힘'}\n\n"
-            f"[고급 세부 보존 옵션]\n{json.dumps(advanced, ensure_ascii=False, indent=2)}\n\n"
-            "[Codex 기본값]\n"
+            "Explain the current Slim tab state in the GccSlim settings screen to the user.\n\n"
+            f"[Default mode]\n- {mode}\n\n"
+            "[Application structure]\n"
+            "Full session\n"
+            "├─ compact summaries / archive   preserved\n"
+            "└─ active region\n"
+            "   ├─ non-context region         compacted\n"
+            "   └─ context-included region    bundle target\n"
+            "      └─ latest N raw turns      preserved as raw\n\n"
+            f"[Default options]\n{option_lines}\n\n"
+            f"[Recent raw protected turns]\n{turns_lines}\n\n"
+            f"[Advanced settings open]\n- {'open' if self._slim_advanced_open else 'closed'}\n\n"
+            f"[Advanced detail-preservation options]\n{json.dumps(advanced, ensure_ascii=False, indent=2)}\n\n"
+            "[Codex defaults]\n"
             f"- mode: {pref_get('codex_slim_default_mode', 'strong')}\n"
             f"- keep_recent: {pref_get('codex_slim_keep_recent', 3)}\n"
             f"- include_compact_summaries: {pref_get('codex_slim_include_compact_summaries', True)}\n"
+            f"- trim_recent_tools: {pref_get('codex_slim_trim_recent_tools', True)}\n"
+            f"- extra_compact_event_types: {pref_get('codex_slim_compact_event_types', '')}\n"
+            f"- extra_compact_text_keys: {pref_get('codex_slim_compact_text_keys', '')}\n"
             f"- clone: {pref_get('codex_slim_default_clone', False)}\n"
             f"- reload: {pref_get('codex_slim_default_reload', True)}\n"
             f"- other_env: {pref_get('codex_slim_default_send_other_env', False)}\n"
             f"- newtab: {pref_get('codex_slim_default_newtab', False)}\n\n"
-            "이 설정이 슬림 버튼 모달의 기본 선택값과 어떻게 연결되는지 간결하게 설명해줘."
+            "Briefly explain how these settings connect to the default selections in the slim button modal."
         )
 
     def _archive_settings_system_prompt(self) -> str:
         return (
-            "당신은 GccSlim 설정 화면의 병합 탭 해설 전용 지능 에이전트입니다.\n"
-            "목표는 사용자가 Archive/병합 설정이 실제 세션 병합, 미리보기, 검색, 복원에 어떤 영향을 주는지 바로 이해하도록 돕는 것입니다.\n"
-            "GccSlim 병합의 기본 개념:\n"
-            "- 병합은 공통 조상을 가진 여러 세션을 새 통합 세션으로 만드는 기능입니다.\n"
-            "- archive 옵션은 병합 전후의 자식 세션 표시, 검색 포함, 복원 정책, 저장 위치를 제어합니다.\n"
-            "- merge stitching 방식은 병합 결과 JSONL에서 여러 세션 흐름을 어떤 형태로 엮을지 정합니다.\n"
-            "주요 옵션 의미:\n"
-            "- preview_mode: 부모/병합 세션 미리보기에서 archive 자식 내용을 어떻게 보여줄지 정합니다.\n"
-            "- search_includes_children: deep search 때 archive 자식 본문까지 검색할지 정합니다.\n"
-            "- important_handling: ★ 표시된 세션을 archive/병합할 때 자동 포함, 확인, 거부 중 하나를 적용합니다.\n"
-            "- restore_enabled: archive 된 세션을 되돌릴 수 있는지, 휴지통 패턴으로 보존할지 정합니다.\n"
-            "- trigger_mode: 병합 진입점을 단축키, 버튼, 둘 다 중 어디로 노출할지 정합니다.\n"
-            "- lazy_load: 자식 본문을 필요할 때만 읽어 큰 세션 목록의 부담을 줄입니다.\n"
-            "- child_color_distinction: archive 자식별 시각 구분을 적용합니다.\n"
-            "- section_header_format: 자식 섹션 헤더를 간단히 또는 자세히 표시합니다.\n"
-            "- child_sort_order: archive 자식 정렬 기준입니다.\n"
-            "- folder_layout: archive 저장 위치를 프로젝트별 또는 중앙 폴더로 정합니다.\n"
-            "- merge_stitching_method: 병합 결과의 대화 엮기 방식입니다.\n"
-            "설명 규칙:\n"
-            "- 한국어로 답합니다.\n"
-            "- 현재 설정값만 근거로 설명합니다.\n"
-            "- 사용자가 어떤 값을 유지하거나 바꾸면 좋은지 마지막에 한 줄로 제안합니다.\n"
-            "- 내부 파일 경로나 구현 세부 함수명보다 사용자에게 보이는 효과 중심으로 설명합니다."
+            "You are an AI explainer dedicated to the Merge tab in the GccSlim settings screen.\n"
+            "Your goal is to help the user quickly understand how Archive/Merge settings affect actual session merge, preview, search, and restore behavior.\n"
+            "Basic GccSlim merge concepts:\n"
+            "- Merge creates a new integrated session from multiple sessions that share a common ancestor.\n"
+            "- Archive options control child-session display, search inclusion, restore policy, and storage location around merge/archive workflows.\n"
+            "- Merge stitching controls how multiple session flows are woven together in the merged JSONL result.\n"
+            "Main option meanings:\n"
+            "- preview_mode: controls how archived child contents appear in parent/merged previews.\n"
+            "- search_includes_children: controls whether deep search includes archived child bodies.\n"
+            "- important_handling: controls automatic include, confirmation, or rejection for sessions marked ★ during archive/merge.\n"
+            "- restore_enabled: controls whether archived sessions can be restored and whether the trash pattern is used.\n"
+            "- trigger_mode: controls whether merge entry points are shown as shortcut, button, or both.\n"
+            "- lazy_load: reads child bodies only when needed to reduce load on large session lists.\n"
+            "- child_color_distinction: applies visual distinction per archived child.\n"
+            "- section_header_format: controls compact or detailed child-section headers.\n"
+            "- child_sort_order: controls archived child sorting.\n"
+            "- folder_layout: controls whether archive storage is per-project or centralized.\n"
+            "- merge_stitching_method: controls the conversation weaving method in the merged result.\n"
+            "Explanation rules:\n"
+            "- Answer in Korean.\n"
+            "- Base the answer only on current settings.\n"
+            "- End with a one-line suggestion about which value the user should keep or change.\n"
+            "- Focus on user-visible effects rather than internal file paths or implementation function names."
         )
 
     def _archive_settings_user_prompt(self) -> str:
@@ -1653,10 +1732,10 @@ class SettingsScreen(ModalScreen[None]):
                 "hint": opt.get("hint", ""),
             }
         return (
-            "GccSlim 설정 화면의 병합 탭 상태를 사용자에게 설명해줘.\n\n"
-            "[현재 병합/Archive 설정]\n"
+            "Explain the current Merge tab state in the GccSlim settings screen to the user.\n\n"
+            "[Current Merge / Archive settings]\n"
             f"{json.dumps(values, ensure_ascii=False, indent=2)}\n\n"
-            "각 설정이 실제 병합, 미리보기, 검색, 복원 흐름에 어떤 영향을 주는지 간결하게 설명해줘."
+            "Briefly explain how each setting affects actual merge, preview, search, and restore flows."
         )
 
     def _open_settings_brain_agent(self, target: str) -> None:
@@ -1673,7 +1752,7 @@ class SettingsScreen(ModalScreen[None]):
         app = self.app
         if not hasattr(app, "_spawn_settings_brain_agent"):
             try:
-                app.notify("설정 지능 에이전트 실행 함수를 찾지 못했습니다.", severity="error", timeout=5)
+                app.notify("Could not find the settings AI agent launcher.", severity="error", timeout=5)
             except Exception:
                 pass
             return
@@ -1685,14 +1764,13 @@ class SettingsScreen(ModalScreen[None]):
 
     # ─── helpers ────────────────────────────────────────────────────
     def _reset_section(self, section_id: str) -> None:
-        """섹션 안의 모든 체크박스/RadioSet 을 default 로 복원.
+        """Reset every checkbox/RadioSet in a section to defaults.
 
-        Checkbox.value 변경 시 on_checkbox_changed 자동 fire 되어 pref_set 따라옴.
-        RadioSet 도 selected 변경 시 on_radio_set_changed fire.
+        Checkbox.value changes automatically fire on_checkbox_changed and pref_set.
+        RadioSet selected changes also fire on_radio_set_changed.
         """
-        # 🪴 /slim 기본값 섹션 — SLIM_DEFAULT_PREFS 의 mode + reload 만 복원.
-        # 모드별 보호 턴 (slim_{mode}_keep_recent_turns) 은 각 모드의 "이 모드 디폴트로"
-        # 버튼 (btn-reset-slim-strong/medium/weak) 이 처리.
+        # /slim defaults section: reset mode, reload, options, and protected turns.
+        # Mode-specific buttons also call into this reset path for their own detail options.
         if section_id == "slim-defaults":
             from gccfork import pref_set
             for k in ("slim_default_mode", "slim_default_reload",
@@ -1734,7 +1812,7 @@ class SettingsScreen(ModalScreen[None]):
                     inp.value = str(SLIM_DEFAULT_PREFS[turns_key])
                 except Exception:
                     pass
-            self.notify("↻ /slim 기본값 10개 (모드 + 옵션 + 보호 턴) 디폴트로 복원")
+            self.notify("↻ /slim defaults restored: mode, options, and protected turns")
             self._refresh_status()
             return
 
@@ -1744,6 +1822,9 @@ class SettingsScreen(ModalScreen[None]):
                 "codex_slim_default_mode",
                 "codex_slim_keep_recent",
                 "codex_slim_include_compact_summaries",
+                "codex_slim_trim_recent_tools",
+                "codex_slim_compact_event_types",
+                "codex_slim_compact_text_keys",
                 "codex_slim_default_clone",
                 "codex_slim_default_reload",
                 "codex_slim_default_send_other_env",
@@ -1765,8 +1846,18 @@ class SettingsScreen(ModalScreen[None]):
                 inp.value = str(SLIM_DEFAULT_PREFS["codex_slim_keep_recent"])
             except Exception:
                 pass
+            for input_id, key in (
+                ("#input-codex_slim_compact_event_types", "codex_slim_compact_event_types"),
+                ("#input-codex_slim_compact_text_keys", "codex_slim_compact_text_keys"),
+            ):
+                try:
+                    inp = self.query_one(input_id, Input)
+                    inp.value = str(SLIM_DEFAULT_PREFS[key])
+                except Exception:
+                    pass
             for chk_id, key in (
                 ("#chk-codex_slim_include_compact_summaries", "codex_slim_include_compact_summaries"),
+                ("#chk-codex_slim_trim_recent_tools", "codex_slim_trim_recent_tools"),
                 ("#chk-codex_slim_default_clone", "codex_slim_default_clone"),
                 ("#chk-codex_slim_default_reload", "codex_slim_default_reload"),
                 ("#chk-codex_slim_default_send_other_env", "codex_slim_default_send_other_env"),
@@ -1777,11 +1868,11 @@ class SettingsScreen(ModalScreen[None]):
                     cb.value = bool(SLIM_DEFAULT_PREFS[key])
                 except Exception:
                     pass
-            self.notify("↻ Codex /slim 기본값 디폴트로 복원")
+            self.notify("↻ Codex /slim defaults restored")
             self._refresh_status()
             return
 
-        # 📝 editor 섹션 — config_editor → auto 복원
+        # Editor section: restore config_editor to auto.
         if section_id == "editor":
             try:
                 from gccfork_config_files import EDITOR_DEFAULT
@@ -1792,16 +1883,16 @@ class SettingsScreen(ModalScreen[None]):
                 rb_default = self.query_one(f"#rb-config_editor-{EDITOR_DEFAULT}", RadioButton)
                 if not rb_default.value:
                     rb_default.value = True
-                    self.notify(f"↻ 편집기 → {EDITOR_DEFAULT}")
+                    self.notify(f"↻ Editor -> {EDITOR_DEFAULT}")
                 else:
-                    self.notify(f"이미 {EDITOR_DEFAULT}", severity="information")
+                    self.notify(f"Already {EDITOR_DEFAULT}", severity="information")
             except Exception:
                 pass
             pref_set("config_editor", EDITOR_DEFAULT)
             self._refresh_status()
             return
 
-        # 🗂 archive 섹션 — ARCHIVE_OPTIONS 기준 복원 (merge 옵션 포함)
+        # Archive section: reset according to ARCHIVE_OPTIONS, including merge options.
         if section_id == "archive":
             try:
                 from gccfork_archive import ARCHIVE_DEFAULTS
@@ -1826,24 +1917,24 @@ class SettingsScreen(ModalScreen[None]):
                     except Exception:
                         pass
                 elif opt["kind"] == "radio":
-                    # default 와 다른 RadioButton 선택 → default 의 RadioButton 클릭
+                    # Select the default RadioButton when a non-default one is selected.
                     try:
                         rb_default = self.query_one(f"#rb-{key}-{default}", RadioButton)
                         if not rb_default.value:
-                            rb_default.value = True  # 라디오 자체가 다른 것 disable
+                            rb_default.value = True  # RadioSet disables the other radio itself.
                             reset_count += 1
                     except Exception:
                         pass
-                    # prefs 도 직접 reset (RadioSet.changed 미발화 케이스 대비)
+                    # Also reset prefs directly in case RadioSet.changed does not fire.
                     pref_set(key, None)
             if reset_count:
-                self.notify(f"↻ '🗂 Archive' — {reset_count}개 디폴트 복원")
+                self.notify(f"↻ '🗂 Archive' — restored {reset_count} defaults")
             else:
-                self.notify("이미 '🗂 Archive' 디폴트 상태", severity="information")
+                self.notify("'🗂 Archive' is already at defaults", severity="information")
             self._refresh_status()
             return
 
-        # 기존 checkbox 섹션
+        # Existing checkbox sections.
         target = next(
             (s for s in get_settings_sections() if s.get("id") == section_id),
             None,
@@ -1859,7 +1950,7 @@ class SettingsScreen(ModalScreen[None]):
                     reset_count += 1
             except Exception:
                 pass
-        # slim-{mode} 섹션 → 보호 턴 Input 도 같이 모드별 디폴트로 리셋.
+        # slim-{mode} sections also reset protected-turn Input to the mode default.
         if section_id.startswith("slim-"):
             mode = section_id[len("slim-"):]
             if mode in ("strong", "medium", "weak"):
@@ -1877,24 +1968,24 @@ class SettingsScreen(ModalScreen[None]):
                         pass
         title = target.get("title", section_id)
         if reset_count:
-            self.notify(f"↻ '{title}' — {reset_count}개 디폴트 복원")
+            self.notify(f"↻ '{title}' — restored {reset_count} defaults")
         else:
-            self.notify(f"이미 '{title}' 디폴트 상태", severity="information")
+            self.notify(f"'{title}' is already at defaults", severity="information")
 
-    # ─── 권고 설치 탭 — 카드 렌더링 + 핸들러 ─────────────────────────
+    # ─── Advisor install tab: card rendering and handlers ───────────────────
     def _refresh_advisor_cards(self) -> None:
-        """advisor 탭 진입/조작 후 카드 5개를 재렌더링.
+        """Re-render advisor cards after entering or operating the advisor tab.
 
-        각 카드의 본문 텍스트는 SelectableTextArea (도움말 탭과 동일 패턴)
-        로 그려서 마우스 좌클릭 드래그로 선택 / 복사할 수 있게 한다.
-        TextArea 는 Rich markup 을 해석하지 않으므로 plain text 만 사용.
+        Each card body is rendered as SelectableTextArea, matching the help tab,
+        so users can left-drag to select/copy. TextArea does not interpret Rich
+        markup, so only plain text is used.
         """
         try:
             host = self.query_one("#advisor-cards-host", Vertical)
         except Exception:
             return
         from gccfork import SelectableTextArea
-        # 기존 자식 모두 제거 — 빠르게 재구성
+        # 제거 existing children and rebuild quickly.
         for child in list(host.children):
             try:
                 child.remove()
@@ -1905,29 +1996,29 @@ class SettingsScreen(ModalScreen[None]):
             snap = install_status_summary()
         except Exception as exc:
             host.mount(Static(
-                f"[dim]권고 상태를 읽지 못했습니다: {exc}[/]",
+                f"[dim]Could not read recommendation status: {exc}[/]",
                 classes="settings-intro", markup=True,
             ))
             return
 
         def _badge(installed: bool, dismissed: bool, blocked: str = "") -> str:
-            # plain text — TextArea 에는 markup 없음
+            # Plain text only; TextArea has no markup.
             if blocked:
                 return f"· {blocked}"
             if installed:
-                return "✓ 설치됨"
+                return "✓ installed"
             if dismissed:
-                return "· 사용자가 안 보이기 처리"
-            return "· 미설치"
+                return "· hidden by user"
+            return "· not installed"
 
         def _mount_card(text: str) -> None:
-            """카드 본문 텍스트를 SelectableTextArea 로 mount.
+            """Mount card body text as SelectableTextArea.
 
-            ID 는 부여하지 않는다 — `_refresh_advisor_cards()` 가 빠르게 연속
-            호출될 때 textual 의 `remove()` 가 비동기라 같은 ID 가 잠시
-            공존하면 DuplicateIds 예외가 발생한다. 카드는 식별 안 해도 됨.
+            Do not assign an id. When `_refresh_advisor_cards()` is called rapidly,
+            textual `remove()` is async, and duplicate ids can temporarily coexist,
+            causing DuplicateIds. Cards do not need identity.
 
-            height 는 `auto` 강제 — TextArea 기본값은 짧아서 본문이 잘림.
+            Force height to auto because the TextArea default can clip body text.
             """
             ta = SelectableTextArea(
                 text,
@@ -1941,14 +2032,14 @@ class SettingsScreen(ModalScreen[None]):
             ta.styles.height = "auto"
             host.mount(ta)
 
-        # 1) cleanup — 현재값 / 권고값 + 짧으면 변경 버튼
+        # 1) cleanup: current value / recommended value, with apply button if too low.
         try:
             from gccfork_cleanup_check import (
                 read_cleanup_period_days, RECOMMENDED_DAYS, DEFAULT_DAYS,
             )
             cur = read_cleanup_period_days()
             effective = DEFAULT_DAYS if cur is None else cur
-            cur_s = f"(미설정 → {DEFAULT_DAYS}일)" if cur is None else f"{cur}일"
+            cur_s = f"(미설정 -> {DEFAULT_DAYS}일)" if cur is None else f"{cur}일"
             _mount_card(
                 f"🧹 cleanupPeriodDays\n"
                 f"현재: {cur_s}\n"
@@ -1958,32 +2049,32 @@ class SettingsScreen(ModalScreen[None]):
             host.mount(row)
             if effective < RECOMMENDED_DAYS:
                 row.mount(Button(
-                    f"권고값({RECOMMENDED_DAYS})으로 변경",
+                    f"권고값 적용 ({RECOMMENDED_DAYS})",
                     id="advisor-cleanup-apply",
                     variant="primary",
                 ))
             else:
-                noop_btn = Button("✓ 이미 권고 이상")
+                noop_btn = Button("✓ 이미 권고값 이상")
                 noop_btn.disabled = True
                 row.mount(noop_btn)
         except Exception as exc:
             _mount_card(f"🧹 cleanupPeriodDays\n읽기 실패: {exc}")
 
-        # 2) stale — 옛 TUI 검출 결과만
+        # 2) stale: old TUI detection result only.
         try:
             from gccfork import _find_other_gccfork_tuis  # type: ignore[attr-defined]
             stale = [i for i in (_find_other_gccfork_tuis() or []) if i.get("is_old")]
             n = len(stale)
-            _mount_card(f"🪦 옛 TUI 인스턴스\n검출: {n}개")
+            _mount_card(f"🪦 이전 TUI 인스턴스\n감지: {n}")
         except Exception:
-            _mount_card("🪦 옛 TUI 인스턴스\n검사 미가용")
+            _mount_card("🪦 이전 TUI 인스턴스\n확인 불가")
 
         # 3) Claude /slim
         cs = snap.get("claude_slash", {})
         cs_badge = _badge(cs.get("installed", False), cs.get("dismissed", False))
         cs_lines = [
             f"🔻 Claude `/slim` 통합   {cs_badge}",
-            "Claude 안에서 `/slim`, `/slim:dry`를 GccSlim으로 연결합니다.",
+            "Claude 안의 `/slim`, `/slim:dry`를 GccSlim에 연결합니다.",
         ]
         _mount_card("\n".join(cs_lines))
         row = Horizontal(classes="settings-section-actions")
@@ -2001,7 +2092,7 @@ class SettingsScreen(ModalScreen[None]):
         cw_badge = _badge(cw.get("installed", False), cw.get("dismissed", False), cw_block)
         cw_lines = [
             f"🔻 Codex `/slim` 통합   {cw_badge}",
-            "Codex 안에서 `/slim` 후 같은 터미널로 재시작하도록 연결합니다.",
+            "Codex에서 `/slim` 후 같은 터미널로 재시작하도록 연결합니다.",
         ]
         _mount_card("\n".join(cw_lines))
         row = Horizontal(classes="settings-section-actions")
@@ -2018,7 +2109,7 @@ class SettingsScreen(ModalScreen[None]):
         dd_badge = _badge(dd.get("installed", False), dd.get("dismissed", False))
         dd_lines = [
             f"🔔 Claude 작업 완료 알림음   {dd_badge}",
-            "Claude 응답 완료 시 알림음을 울립니다.",
+            "Claude 응답이 끝나면 알림음을 재생합니다.",
         ]
         if not dd.get("deps_ok", False):
             dd_lines.append("필요한 오디오 의존성이 아직 준비되지 않았습니다.")
@@ -2037,7 +2128,7 @@ class SettingsScreen(ModalScreen[None]):
         cdd_badge = _badge(cdd.get("installed", False), cdd.get("dismissed", False))
         cdd_lines = [
             f"🔔 Codex 작업 완료 알림음   {cdd_badge}",
-            "Codex 응답 완료 시 알림음을 울립니다.",
+            "Codex 응답이 끝나면 알림음을 재생합니다.",
         ]
         if not cdd.get("deps_ok", False):
             cdd_lines.append("필요한 오디오 의존성이 아직 준비되지 않았습니다.")
@@ -2051,7 +2142,7 @@ class SettingsScreen(ModalScreen[None]):
             btn.disabled = not cdd.get("deps_ok", False)
             row.mount(btn)
 
-        # 7) VS Code terminal scrollback
+        # 7) VS Code 터미널 히스토리
         vs = snap.get("vscode_scrollback", {})
         vs_installed = bool(vs.get("installed", False))
         vs_value = vs.get("value")
@@ -2060,9 +2151,9 @@ class SettingsScreen(ModalScreen[None]):
         vs_badge = "✓ 권고값 적용됨" if vs_installed else "· 권고값 미만"
         vs_lines = [
             f"🧾 VS Code 터미널 히스토리   {vs_badge}",
-            f"현재: {vs_current}",
+            f"current: {vs_current}",
             f"권고: {vs_recommended}줄",
-            "하드 복제 세션을 열 때 과거 대화 재생이 앞부분까지 남도록 충분한 스크롤백을 확보합니다.",
+            "하드 복제 세션의 재생 대화 시작 부분이 보존되도록 충분한 스크롤백을 유지합니다.",
         ]
         _mount_card("\n".join(vs_lines))
         row = Horizontal(classes="settings-section-actions")
@@ -2075,7 +2166,7 @@ class SettingsScreen(ModalScreen[None]):
             row.mount(Button(f"{vs_recommended}줄로 설정", id="advisor-vscode-scrollback-apply", variant="primary"))
 
     def _handle_advisor_action(self, action: str) -> None:
-        """advisor 탭 카드 버튼 클릭 → install_advisor 함수 호출 + 재렌더링."""
+        """Handle advisor card button clicks by calling install_advisor functions and re-rendering."""
         from gccfork_install_advisor import (
             apply_claude_slash_install, uninstall_claude_slash,
             apply_codex_wrapper_install, uninstall_codex_wrapper,
@@ -2088,7 +2179,7 @@ class SettingsScreen(ModalScreen[None]):
             from gccfork_cleanup_check import update_cleanup_period_days, RECOMMENDED_DAYS
             ok, info = update_cleanup_period_days(RECOMMENDED_DAYS)
             msg = (
-                f"cleanupPeriodDays = {RECOMMENDED_DAYS}일 적용. {info}"
+                f"cleanupPeriodDays = {RECOMMENDED_DAYS} days 적용됨. {info}"
                 if ok else f"적용 실패: {info}"
             )
         elif action == "claude-slash-install":
@@ -2120,7 +2211,7 @@ class SettingsScreen(ModalScreen[None]):
         self._refresh_advisor_cards()
 
     def _refresh_status(self) -> None:
-        """푸터 — 디폴트와 다른 prefs 개수 표시 (archive 옵션 포함)."""
+        """Footer status showing number of prefs different from defaults, including archive options."""
         from gccfork import pref_get
         changed = 0
         for section in get_settings_sections():
@@ -2130,7 +2221,7 @@ class SettingsScreen(ModalScreen[None]):
                 cur = pref_get(item["key"], item["default"])
                 if bool(cur) != bool(item["default"]):
                     changed += 1
-        # 🗂 archive + merge 옵션 — bool/enum 모두 카운트
+        # Count archive + merge bool/enum options.
         try:
             from gccfork_archive import ARCHIVE_DEFAULTS
         except ImportError:
@@ -2160,6 +2251,9 @@ class SettingsScreen(ModalScreen[None]):
             "codex_slim_default_mode",
             "codex_slim_keep_recent",
             "codex_slim_include_compact_summaries",
+            "codex_slim_trim_recent_tools",
+            "codex_slim_compact_event_types",
+            "codex_slim_compact_text_keys",
             "codex_slim_default_clone",
             "codex_slim_default_reload",
             "codex_slim_default_send_other_env",
@@ -2170,8 +2264,8 @@ class SettingsScreen(ModalScreen[None]):
         try:
             status = self.query_one("#settings-status", Static)
             if changed == 0:
-                status.update("· 모두 디폴트 상태")
+                status.update("· all defaults")
             else:
-                status.update(f"· {changed}개 변경됨")
+                status.update(f"· {changed} changed")
         except Exception:
             pass

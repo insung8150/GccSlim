@@ -200,7 +200,7 @@ class CleanupConfirmScreen(ModalScreen[bool]):
         with Vertical(id="cleanup-box"):
             with Vertical(id="cleanup-header"):
                 yield Static(
-                    "⚠  Claude 자동 세션 삭제 경고",
+                    "⚠  Claude Automatic Session Cleanup Warning",
                     id="cleanup-title",
                 )
                 yield Static(
@@ -209,30 +209,31 @@ class CleanupConfirmScreen(ModalScreen[bool]):
                 )
             with Vertical(id="cleanup-body"):
                 yield Static(
-                    f"현재 값: [b]{self.current_value}일[/b]  →  {self.current_value}일 "
-                    "지난 세션 jsonl 이 claude 시작 시 [b]자동 삭제[/b]됩니다.",
+                    f"Current value: [b]{self.current_value} days[/b]  →  session JSONL files "
+                    f"older than {self.current_value} days are [b]deleted automatically[/b] "
+                    "when claude starts.",
                     markup=True,
                     classes="cleanup-warn",
                 )
                 yield Static(
-                    "GccSlim 의 archive / merge variant 도 jsonl 이라 같이 삭제됩니다. "
-                    "사용자가 수년 후 옛 작업을 꺼내려 할 때 [b]복구 불가능[/b].",
+                    "GccSlim archive and merge variants are also JSONL files, so they are "
+                    "[b]deleted too[/b]. Old work may become unrecoverable years later.",
                     markup=True,
                 )
                 yield Static(
-                    f"권장: [b]{RECOMMENDED_DAYS}일[/b] (~27년) 으로 변경 → 사실상 영구 보관.",
+                    f"Recommended: set [b]{RECOMMENDED_DAYS} days[/b] (~27 years) for practical permanent retention.",
                     markup=True,
                     classes="cleanup-info",
                 )
                 yield Static(
-                    "[Esc / Later] 누르면 다음 시작 시 다시 안내합니다.",
+                    "Press [Esc / Later] to be reminded on the next start.",
                     classes="cleanup-dim",
                 )
             with Horizontal(id="cleanup-footer"):
                 yield Static("", classes="cleanup-spacer")
                 yield Button("Later", id="cleanup-later", variant="default")
                 yield Button(
-                    f"영구 보관 ({RECOMMENDED_DAYS}일)",
+                    f"Keep Permanently ({RECOMMENDED_DAYS} days)",
                     id="cleanup-apply",
                     variant="primary",
                 )
@@ -244,7 +245,7 @@ class CleanupConfirmScreen(ModalScreen[bool]):
             if ok:
                 try:
                     self.app.notify(
-                        f"✓ cleanupPeriodDays = {RECOMMENDED_DAYS}일 적용. backup: {msg}",
+                        f"✓ cleanupPeriodDays = {RECOMMENDED_DAYS} days applied. backup: {msg}",
                         severity="information",
                         timeout=8,
                     )
@@ -254,7 +255,7 @@ class CleanupConfirmScreen(ModalScreen[bool]):
             else:
                 try:
                     self.app.notify(
-                        f"✗ 변경 실패: {msg}",
+                        f"✗ change failed: {msg}",
                         severity="error",
                         timeout=10,
                     )
