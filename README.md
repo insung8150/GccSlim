@@ -8,6 +8,22 @@ This staging folder is a **binary distribution**, not the internal development s
 
 ![GccSlim usage guide](assets/gccslim-guide-en.png)
 
+## Screenshots
+
+> 📸 _Placeholders below — replace with real captures of the TUI. A short animated GIF of `gccslim` running is the highest-impact asset for the repo page._
+
+| Main session view | Slim workflow in action |
+|---|---|
+| ![GccSlim main TUI](assets/screenshot-main.png) | ![GccSlim slim workflow](assets/screenshot-slim.png) |
+
+<!--
+TODO (screenshots):
+  1. Capture the `gccslim` TUI and save as assets/screenshot-main.png
+  2. Capture a slim/restart run and save as assets/screenshot-slim.png
+  3. (Best) Record a short GIF and embed it at the top of this section.
+Then delete the placeholder note above.
+-->
+
 ## QR
 
 Scan this QR code to open the GitHub repository.
