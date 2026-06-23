@@ -75,6 +75,15 @@ codex-slim-loop
 codex-slim-now
 ```
 
+## How it integrates
+
+GccSlim leans on Claude Code's official extension points and keeps any modification optional and reversible:
+
+- **Trigger** — `/slim` and `/slim:dry` use Claude Code's official `UserPromptSubmit` hook. Installing it only adds one entry to `~/.claude/settings.json` (backed up first, fully reversible via `patch-settings.py --remove`).
+- **Slimming** — only rewrites the session JSONL. It never modifies Claude Code itself, and originals go to a restorable trash.
+- **Optional "slim-and-resume"** — refreshing a live session right after slimming is driven by Claude's official resume command. This convenience is opt-in, disclosed at install, backed up, and reversible; in-place slim works without it.
+- **Local only** — everything runs on your local session files. It does not touch authentication, usage limits, or billing, and uploads nothing.
+
 ## Included
 
 - `bin/gccslim`: public TUI entrypoint.

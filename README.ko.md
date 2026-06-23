@@ -75,6 +75,15 @@ codex-slim-loop
 codex-slim-now
 ```
 
+## 동작 방식 (통합)
+
+GccSlim은 Claude Code의 공식 확장 지점을 우선 사용하고, 모든 수정은 선택적·가역적으로 유지하도록 설계했습니다:
+
+- **트리거** — `/slim`, `/slim:dry`는 Claude Code 공식 `UserPromptSubmit` 훅을 사용합니다. 설치 시 `~/.claude/settings.json`에 항목 하나만 추가하며(먼저 백업), `patch-settings.py --remove`로 완전히 되돌릴 수 있습니다.
+- **슬림** — 세션 JSONL만 다시 씁니다. Claude Code 본체는 건드리지 않으며, 원본은 복원 가능한 휴지통으로 이동합니다.
+- **선택적 "슬림 후 resume"** — 슬림 직후 열린 세션을 갱신하는 기능은 Claude의 공식 resume 명령으로 동작합니다. 옵트인이며 설치 시 고지되고, 백업·복원이 가능합니다. in-place 슬림은 이것 없이도 동작합니다.
+- **로컬 전용** — 모든 처리는 로컬 세션 파일에서 이뤄집니다. 인증·사용량 한도·과금을 건드리지 않고, 외부로 아무것도 전송하지 않습니다.
+
 ## 포함 항목
 
 - `bin/gccslim`: 공개 TUI 실행 파일.
