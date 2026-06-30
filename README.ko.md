@@ -16,13 +16,11 @@ Claude Code나 Codex CLI를 쓰면서, 이런 적 없으셨나요?
 
 _(덤으로, 너무 커진 세션은 "슬림"으로 가볍게 줄일 수도 있습니다 — 최근 작업은 그대로 두고 오래된 무거운 부분만 잘라내, 새로 시작하지 않아도 다시 가벼워집니다.)_
 
-![GccSlim 사용 편의성 가이드](assets/gccslim-guide.png)
+![GccSlim](assets/screenshot-ko.png)
 
-## QR
+<sub>모든 기능을 한 화면에:</sub>
 
-이 QR 코드를 스캔하면 GitHub 저장소가 열립니다.
-
-![GccSlim GitHub QR](assets/gccslim-github-qr.png)
+![GccSlim 기능 가이드](assets/gccslim-guide-ko-white.png)
 
 ## 언어 선택
 

@@ -15,13 +15,11 @@ If you use Claude Code or Codex CLI, have you ever:
 
 _(And when a session gets too big, you can "slim" it down too — trim the old, heavy parts while keeping your recent work, so it's fast again without starting over.)_
 
-![GccSlim usage guide](assets/gccslim-guide-en.png)
+![GccSlim](assets/screenshot.png)
 
-## QR
+<sub>Every feature on one screen:</sub>
 
-Scan this QR code to open the GitHub repository.
-
-![GccSlim GitHub QR](assets/gccslim-github-qr.png)
+![GccSlim feature guide](assets/gccslim-guide-en-white.png)
 
 ## Choose your language
 
