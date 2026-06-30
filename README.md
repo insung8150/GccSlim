@@ -2,9 +2,18 @@
 
 Current release: `v2026.05.26.1`
 
-GccSlim is a local session management and session-slimming distribution for Claude Code and Codex CLI workflows.
+If you use Claude Code or Codex CLI, have you ever:
 
-This staging folder is a **binary distribution**, not the internal development source tree. Rust implementation sources, regression fixtures, private work logs, local session files, hostnames, IP addresses, and personal paths are intentionally excluded.
+- lost track of a conversation because the session is just a random ID — and wished you could **give it a real name**?
+- wanted to **duplicate a session as-is** to try another direction while keeping the original?
+- wanted to take a session you started in Claude Code and **hand it straight to Codex** to keep going?
+- wished you could see every session scattered across projects **in one place** and tidy them up?
+
+**That's what GccSlim is for.** Manage all your Claude Code and Codex sessions from one terminal UI — name them, duplicate them, move them, merge/split them, and pass them between Claude Code and Codex.
+
+> 💡 Keep GccSlim open as your session manager in your main terminal, and open any session you pick straight into your VS Code terminal. Browse and pick on one side, work the session on the other.
+
+_(And when a session gets too big, you can "slim" it down too — trim the old, heavy parts while keeping your recent work, so it's fast again without starting over.)_
 
 ![GccSlim usage guide](assets/gccslim-guide-en.png)
 
@@ -75,14 +84,14 @@ codex-slim-loop
 codex-slim-now
 ```
 
-## How it integrates
+## How it works with Claude Code
 
-GccSlim leans on Claude Code's official extension points and keeps any modification optional and reversible:
+GccSlim sticks to Claude Code's official extension points, and anything it changes is optional and reversible:
 
-- **Trigger** — `/slim` and `/slim:dry` use Claude Code's official `UserPromptSubmit` hook. Installing it only adds one entry to `~/.claude/settings.json` (backed up first, fully reversible via `patch-settings.py --remove`).
-- **Slimming** — only rewrites the session JSONL. It never modifies Claude Code itself, and originals go to a restorable trash.
-- **Optional "slim-and-resume"** — refreshing a live session right after slimming is driven by Claude's official resume command. This convenience is opt-in, disclosed at install, backed up, and reversible; in-place slim works without it.
-- **Local only** — everything runs on your local session files. It does not touch authentication, usage limits, or billing, and uploads nothing.
+- The `/slim` command works through Claude Code's official hook — installing it just adds one line to `~/.claude/settings.json`, and you can remove it anytime.
+- Slimming only edits your own session files. It never changes Claude Code itself, and the originals go to a trash you can restore from.
+- Optionally, it can refresh a running session right after slimming, using Claude's own resume command. This is opt-in and reversible; plain slimming works without it.
+- Everything runs locally. It doesn't touch your login, usage limits, or billing, and nothing is uploaded.
 
 ## Included
 
@@ -101,7 +110,9 @@ GccSlim leans on Claude Code's official extension points and keeps any modificat
 
 Compatibility wrappers named `gccfork-slim` and `gccfork-claude-patch` are included because some internal dispatch paths still call those legacy names.
 
-## Not Included
+## About this distribution
+
+This repo is a **binary distribution**, not the internal development source tree. The Rust core ships as stripped binaries; the Python layer, install scripts, and integration are included as source. Deliberately excluded:
 
 - Rust source code.
 - Rust tests or internal regression fixtures.
