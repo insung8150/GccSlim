@@ -21,66 +21,21 @@ _(And when a session gets too big, you can "slim" it down too — trim the old, 
 
 ![GccSlim feature guide](assets/gccslim-guide-en-white.png)
 
-## Choose your language
+## Install
 
-GccSlim ships separate **Korean** and **English** distributions. Pick the asset matching your language and platform from the [latest release](https://github.com/insung8150/GccSlim/releases/latest):
+GccSlim is for Claude Code / Codex users — so let your agent install it. Paste this into Claude Code or Codex:
 
-| Language | Platform | Asset |
-|---|---|---|
-| English | Linux x86_64 | `gccslim-en-linux-x86_64-<version>.tar.gz` |
-| English | macOS arm64 | `gccslim-en-macos-arm64-<version>.tar.gz` |
-| Korean  | Linux x86_64 | `gccslim-ko-linux-x86_64-<version>.tar.gz` |
-| Korean  | macOS arm64 | `gccslim-ko-macos-arm64-<version>.tar.gz` |
+> Clone github.com/insung8150/GccSlim, check the scripts for anything unsafe, then run install.sh.
+
+It clones the repo, looks it over, and installs to `~/.local/bin`. Then run:
 
 ```bash
-# English on Linux
-tar xzf gccslim-en-linux-x86_64-*.tar.gz
-cd gccslim-en-linux-x86_64-*
-bash install.sh
-gccslim    # English UI
-
-# Korean on Linux
-tar xzf gccslim-ko-linux-x86_64-*.tar.gz
-cd gccslim-ko-linux-x86_64-*
-bash install.sh
-gccslim    # Korean UI
-```
-
-**Switching languages later**
-
-Both language tarballs install into the same `~/.local/bin/gccslim`. To switch, download the other language tarball and run `install.sh` again — it overwrites the binary and updates `~/.local/share/gccslim/default-language` accordingly.
-
-The settings panel has a `Language` radio that refreshes a few labels in place, but a complete UI switch still requires installing the matching tarball.
-
-한국어 안내는 [README.ko.md](README.ko.md) 참고.
-
-## Run
-
-Without installing:
-
-```bash
-./bin/gccslim
-```
-
-Install into `~/.local/bin`:
-
-```bash
-./install.sh
 gccslim
 ```
 
-Direct slim command:
+English and Korean UIs are both included. Prefer to do it by hand or want a prebuilt tarball? See the [latest release](https://github.com/insung8150/GccSlim/releases/latest).
 
-```bash
-gccslim-now
-```
-
-Codex helper commands installed by this release:
-
-```bash
-codex-slim-loop
-codex-slim-now
-```
+한국어 안내는 [README.ko.md](README.ko.md).
 
 ## How it works with Claude Code
 
@@ -91,33 +46,9 @@ GccSlim sticks to Claude Code's official extension points, and anything it chang
 - Optionally, it can refresh a running session right after slimming, using Claude's own resume command. This is opt-in and reversible; plain slimming works without it.
 - Everything runs locally. It doesn't touch your login, usage limits, or billing, and nothing is uploaded.
 
-## Included
-
-- `bin/gccslim`: public TUI entrypoint.
-- `bin/gccslim-now`: direct slim wrapper for the active Claude session.
-- `bin/gccslim-slim`: platform-selecting slim wrapper.
-- `bin/gccslim-claude-patch`: platform-selecting Claude patch wrapper.
-- `bin/codex-slim-loop`: Codex same-terminal slim/restart wrapper.
-- `bin/codex-slim-now`: Codex active-session slim request helper.
-- `bin/gccfork_codex_slim_loop.py`: Codex wrapper loop sidecar.
-- `bin/gccfork_codex_slim_reload.py`: Codex JSONL slim plan/apply sidecar.
-- `bin/linux-x86_64/`: stripped Linux x86_64 Rust binaries.
-- `bin/macos-arm64/`: stripped macOS arm64 Rust binaries.
-- `bin/gccfork_*.py`: Python sidecar modules kept under compatibility names.
-- `share/gccslim/brain-system-prompt.md`: sanitized runtime prompt.
-
-Compatibility wrappers named `gccfork-slim` and `gccfork-claude-patch` are included because some internal dispatch paths still call those legacy names.
-
 ## About this distribution
 
-This repo is a **binary distribution**, not the internal development source tree. The Rust core ships as stripped binaries; the Python layer, install scripts, and integration are included as source. Deliberately excluded:
-
-- Rust source code.
-- Rust tests or internal regression fixtures.
-- Private session logs.
-- Local `.claude`, `.codex`, `.gccfork` state.
-- Internal Korean work logs and migration notes.
-- Machine-specific SSH, hostname, IP, and absolute-path notes.
+Nothing sketchy in here. The Rust core ships as a binary only to keep the Claude-Code-patching part out of public source — purely to stay on the safe side of Anthropic's terms, not because the code does anything harmful. Everything else (the Python layer, install scripts, and integration) is open in this repo.
 
 ## License
 
