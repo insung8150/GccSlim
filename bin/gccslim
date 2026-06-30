@@ -6758,10 +6758,10 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             yield Button("🌿 분기", id="btn-fork", variant="primary")
             yield Button("🍃 복제", id="btn-hard-fork", variant="warning")
             yield Button("🔻 슬림", id="btn-slim", variant="warning")
-            yield Button("🪚 Unfold", id="btn-unfold", variant="warning")
-            yield Button("🪴 Resume", id="btn-resume", variant="success")
-            yield Button("📛 Name", id="btn-rename")
-            yield Button("🍂 Quit", id="btn-quit")
+            yield Button("🪚 해제", id="btn-unfold", variant="warning")
+            yield Button("🪴 재개", id="btn-resume", variant="success")
+            yield Button("📛 이름", id="btn-rename")
+            yield Button("🍂 종료", id="btn-quit")
         yield CopyMenuOverlay(id="copy-menu")
 
     def on_mount(self) -> None:
