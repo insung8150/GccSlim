@@ -4297,7 +4297,7 @@ class SlimModeScreen(ModalScreen[Optional[dict]]):
             pass
         try:
             btn = self.query_one("#btn-slim-details", Button)
-            btn.label = "Hide Details" if self._details_open else "Show Details"
+            btn.label = "숨기기" if self._details_open else "상세 보기"
         except Exception:
             pass
         try:
