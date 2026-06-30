@@ -26,6 +26,14 @@ from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Static, Button
 
+# i18n — this modal builds its strings inline, so resolve the active language
+# directly (falls back to English if the i18n helper is unavailable).
+try:
+    from gccfork_i18n import current_language
+except Exception:  # pragma: no cover - i18n optional
+    def current_language() -> str:  # type: ignore[misc]
+        return "en"
+
 
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
@@ -197,10 +205,14 @@ class CleanupConfirmScreen(ModalScreen[bool]):
         self.current_value = current_value
 
     def compose(self) -> ComposeResult:
+        ko = current_language() == "ko"
+        cur = self.current_value
+        rec = RECOMMENDED_DAYS
         with Vertical(id="cleanup-box"):
             with Vertical(id="cleanup-header"):
                 yield Static(
-                    "⚠  Claude Automatic Session Cleanup Warning",
+                    "⚠  Claude 자동 세션 정리 경고" if ko
+                    else "⚠  Claude Automatic Session Cleanup Warning",
                     id="cleanup-title",
                 )
                 yield Static(
@@ -209,43 +221,64 @@ class CleanupConfirmScreen(ModalScreen[bool]):
                 )
             with Vertical(id="cleanup-body"):
                 yield Static(
-                    f"Current value: [b]{self.current_value} days[/b]  →  session JSONL files "
-                    f"older than {self.current_value} days are [b]deleted automatically[/b] "
-                    "when claude starts.",
+                    (
+                        f"현재 값: [b]{cur}일[/b]  →  {cur}일이 지난 세션 JSONL 파일은 "
+                        "claude 시작 시 [b]자동 삭제[/b]됩니다."
+                    ) if ko else (
+                        f"Current value: [b]{cur} days[/b]  →  session JSONL files "
+                        f"older than {cur} days are [b]deleted automatically[/b] "
+                        "when claude starts."
+                    ),
                     markup=True,
                     classes="cleanup-warn",
                 )
                 yield Static(
-                    "GccSlim archive and merge variants are also JSONL files, so they are "
-                    "[b]deleted too[/b]. Old work may become unrecoverable years later.",
+                    (
+                        "GccSlim의 아카이브·병합본도 JSONL 파일이라 [b]함께 삭제[/b]됩니다. "
+                        "오래된 작업이 몇 년 뒤 복구 불가능해질 수 있습니다."
+                    ) if ko else (
+                        "GccSlim archive and merge variants are also JSONL files, so they are "
+                        "[b]deleted too[/b]. Old work may become unrecoverable years later."
+                    ),
                     markup=True,
                 )
                 yield Static(
-                    f"Recommended: set [b]{RECOMMENDED_DAYS} days[/b] (~27 years) for practical permanent retention.",
+                    (
+                        f"권장: [b]{rec}일[/b](~27년)로 설정해 사실상 영구 보관하세요."
+                    ) if ko else (
+                        f"Recommended: set [b]{rec} days[/b] (~27 years) for practical permanent retention."
+                    ),
                     markup=True,
                     classes="cleanup-info",
                 )
                 yield Static(
-                    "Press [Esc / Later] to be reminded on the next start.",
+                    "[Esc / 나중에]를 누르면 다음 시작 때 다시 알립니다." if ko
+                    else "Press [Esc / Later] to be reminded on the next start.",
                     classes="cleanup-dim",
                 )
             with Horizontal(id="cleanup-footer"):
                 yield Static("", classes="cleanup-spacer")
-                yield Button("Later", id="cleanup-later", variant="default")
                 yield Button(
-                    f"Keep Permanently ({RECOMMENDED_DAYS} days)",
+                    "나중에" if ko else "Later",
+                    id="cleanup-later",
+                    variant="default",
+                )
+                yield Button(
+                    (f"영구 보관 ({rec}일)") if ko else f"Keep Permanently ({rec} days)",
                     id="cleanup-apply",
                     variant="primary",
                 )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        ko = current_language() == "ko"
         if bid == "cleanup-apply":
             ok, msg = update_cleanup_period_days(RECOMMENDED_DAYS)
             if ok:
                 try:
                     self.app.notify(
-                        f"✓ cleanupPeriodDays = {RECOMMENDED_DAYS} days applied. backup: {msg}",
+                        (f"✓ cleanupPeriodDays = {RECOMMENDED_DAYS}일 적용됨. 백업: {msg}") if ko
+                        else f"✓ cleanupPeriodDays = {RECOMMENDED_DAYS} days applied. backup: {msg}",
                         severity="information",
                         timeout=8,
                     )
@@ -255,7 +288,7 @@ class CleanupConfirmScreen(ModalScreen[bool]):
             else:
                 try:
                     self.app.notify(
-                        f"✗ change failed: {msg}",
+                        (f"✗ 변경 실패: {msg}") if ko else f"✗ change failed: {msg}",
                         severity="error",
                         timeout=10,
                     )
