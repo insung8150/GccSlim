@@ -72,8 +72,18 @@ def normalize_language(value: Any) -> str:
     return DEFAULT_LANGUAGE
 
 
-def _env_language() -> str | None:
-    for key in ("GCCSLIM_LANG", "GCCFORK_LANG", "LANGUAGE", "LC_ALL", "LANG"):
+def _explicit_env_language() -> str | None:
+    """GccSlim-specific override env vars (highest priority)."""
+    for key in ("GCCSLIM_LANG", "GCCFORK_LANG"):
+        value = os.environ.get(key)
+        if value:
+            return normalize_language(value)
+    return None
+
+
+def _locale_env_language() -> str | None:
+    """Ambient OS locale (lowest-priority hint, below explicit user choices)."""
+    for key in ("LANGUAGE", "LC_ALL", "LANG"):
         value = os.environ.get(key)
         if value:
             normalized_raw = str(value).strip().lower()
@@ -86,17 +96,19 @@ def _env_language() -> str | None:
 def current_language(default: str = DEFAULT_LANGUAGE) -> str:
     """Return the active UI language.
 
-    Preference order:
-    1. GCCSLIM_LANG / GCCFORK_LANG / locale environment
-    2. GccSlim prefs key `ui_language`
-    3. caller default / English
+    Preference order (explicit user choices win over the ambient OS locale):
+    1. GCCSLIM_LANG / GCCFORK_LANG override env vars
+    2. GccSlim prefs key `ui_language` (the in-app Language setting)
+    3. default-language file (the install-time choice)
+    4. OS locale environment (LANGUAGE / LC_ALL / LANG)
+    5. caller default / English
 
     The import is intentionally lazy to avoid circular imports during process
     start. If prefs are unavailable, English remains the safe public default.
     """
-    env_lang = _env_language()
-    if env_lang:
-        return env_lang
+    explicit = _explicit_env_language()
+    if explicit:
+        return explicit
     try:
         from gccfork_sessions import load_prefs
 
@@ -112,6 +124,9 @@ def current_language(default: str = DEFAULT_LANGUAGE) -> str:
             continue
         if value:
             return normalize_language(value)
+    locale_lang = _locale_env_language()
+    if locale_lang:
+        return locale_lang
     return normalize_language(default)
 
 
