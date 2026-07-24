@@ -232,7 +232,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat older than 60 seconds is considered dead
 
-GCCFORK_VERSION = "2026.07.25.1"
+GCCFORK_VERSION = "2026.07.25.2"
 GCCFORK_WORKER = "Claude"
 
 
@@ -8152,16 +8152,39 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             all_to_move = all_with_desc if preserve_tree else direct_sessions
             new_slug = cwd_to_slug(dest)
             new_dir = PROJECTS_DIR / new_slug
-            try:
-                new_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                self.notify(f"Failed to create target folder: {exc}", severity="error")
-                return
+            # Codex sessions live in ~/.codex/sessions and bind to a project via
+            # session_meta.cwd, not a project folder. Only create the Claude
+            # project dir when at least one Claude session is being moved.
+            if any(s.source != "codex" for s in all_to_move):
+                try:
+                    new_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    self.notify(f"Failed to create target folder: {exc}", severity="error")
+                    return
             moved = 0
             failed = 0
             failure_details: list[str] = []
             for sess in all_to_move:
                 try:
+                    if sess.source == "codex":
+                        # Codex move = rewrite session_meta.cwd in place (file stays
+                        # in ~/.codex/sessions). Do NOT relocate to the Claude dir.
+                        if not sess.jsonl_path.exists():
+                            failed += 1
+                            failure_details.append(
+                                f"{sess.short_id}: source file missing -> {sess.jsonl_path}"
+                            )
+                            continue
+                        if (sess.cwd or "").rstrip("/") == dest.rstrip("/"):
+                            failed += 1
+                            failure_details.append(
+                                f"{sess.short_id}: already in target folder"
+                            )
+                            continue
+                        _rewrite_codex_session_cwd(sess.jsonl_path, sess.cwd or "", dest)
+                        _update_codex_state_db_cwd(sess.id, dest)
+                        moved += 1
+                        continue
                     new_path = new_dir / sess.jsonl_path.name
                     # Same path, destination slug is current slug; nothing to move.
                     if new_path == sess.jsonl_path:
@@ -8303,11 +8326,14 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             sessions_to_copy = all_with_desc if preserve_tree else direct_sessions
             new_slug = cwd_to_slug(dest)
             new_dir = PROJECTS_DIR / new_slug
-            try:
-                new_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                self.notify(f"Failed to create target folder: {exc}", severity="error")
-                return
+            # Codex copies clone within ~/.codex/sessions; the Claude project dir
+            # is only needed when a Claude session is in the copy set.
+            if any(s.source != "codex" for s in sessions_to_copy):
+                try:
+                    new_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    self.notify(f"Failed to create target folder: {exc}", severity="error")
+                    return
 
             # Preserve-tree mode: precompute old_id -> new_id for every copy target,
             # then set parent_id to the mapped value for tree consistency.
@@ -8319,6 +8345,44 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             for sess in sessions_to_copy:
                 try:
                     new_uuid = id_map[sess.id]
+                    if sess.source == "codex":
+                        # Codex copy = clone within ~/.codex/sessions with a new
+                        # session id, then rewrite session_meta.cwd to dest.
+                        if not sess.jsonl_path.exists():
+                            failed += 1
+                            failure_details.append(
+                                f"{sess.short_id}: source file missing"
+                            )
+                            continue
+                        cx_path = _make_codex_clone_path(sess.jsonl_path, sess.id, new_uuid)
+                        if cx_path.exists():
+                            failed += 1
+                            failure_details.append(
+                                f"{sess.short_id}: a file with the same ID exists at target"
+                            )
+                            continue
+                        cx_path.parent.mkdir(parents=True, exist_ok=True)
+                        with cx_path.open("w", encoding="utf-8") as fout, \
+                                sess.jsonl_path.open("r", encoding="utf-8", errors="ignore") as fin:
+                            for line in fin:
+                                fout.write(
+                                    _rewrite_codex_session_meta_line(line, sess.id, new_uuid)
+                                )
+                        _rewrite_codex_session_cwd(cx_path, sess.cwd or "", dest)
+                        copy_name = (
+                            f"[Copy] {sess.custom_name or sess.auto_summary or sess.short_id}"
+                        )[:120]
+                        registry_set(
+                            new_uuid,
+                            parent_id=sess.id,
+                            fork_type="hard",
+                            name=copy_name,
+                            source_cli="codex",
+                            source_session_id=sess.id,
+                            source_jsonl=str(sess.jsonl_path),
+                        )
+                        copied += 1
+                        continue
                     new_path = new_dir / f"{new_uuid}.jsonl"
                     if new_path.exists():
                         failed += 1
@@ -12418,6 +12482,88 @@ def _rewrite_all_cwd_fields(jsonl_path: Path, old_cwd: str, new_cwd: str) -> int
         except OSError:
             return 0
     return changed
+
+
+def _rewrite_codex_session_cwd(jsonl_path: Path, old_cwd: str, new_cwd: str) -> int:
+    """Rewrite a Codex session's project cwd inside its JSONL.
+
+    Unlike Claude (top-level per-line `cwd`), Codex records the project path in
+    the nested `session_meta.payload.cwd` (and `turn_context.payload.cwd`).
+    `/resume` and gccslim's project scope both filter on session_meta.payload.cwd,
+    so a moved/copied Codex session stays hidden under the new folder unless this
+    field is rewritten. Codex re-derives its state DB from session_meta, so this
+    JSONL rewrite is the durable fix. Returns the number of changed lines.
+    """
+    if not new_cwd:
+        return 0
+    try:
+        text = jsonl_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    old_norm = (old_cwd or "").rstrip("/")
+    out_lines: list[str] = []
+    changed = 0
+    for line in text.splitlines():
+        if not line.strip():
+            out_lines.append(line)
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            out_lines.append(line)
+            continue
+        payload = obj.get("payload")
+        line_changed = False
+        if isinstance(payload, dict) and isinstance(payload.get("cwd"), str):
+            cur = payload["cwd"].rstrip("/")
+            if obj.get("type") == "session_meta":
+                # Authoritative field /resume filters on: force to the new cwd.
+                if payload["cwd"] != new_cwd:
+                    payload["cwd"] = new_cwd
+                    line_changed = True
+            elif old_norm and (cur == old_norm or cur.startswith(old_norm + "/")):
+                payload["cwd"] = new_cwd + cur[len(old_norm):]
+                line_changed = True
+        if line_changed:
+            obj["payload"] = payload
+            out_lines.append(json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
+            changed += 1
+        else:
+            out_lines.append(line)
+    if changed > 0:
+        try:
+            tmp = jsonl_path.with_suffix(jsonl_path.suffix + ".tmp")
+            tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+            tmp.replace(jsonl_path)
+        except OSError:
+            return 0
+    return changed
+
+
+def _update_codex_state_db_cwd(session_id: str, new_cwd: str) -> int:
+    """Best-effort update of the Codex state DB thread cwd.
+
+    Codex rebuilds this row from session_meta on rescan, so the JSONL rewrite is
+    the durable fix; this only makes the change visible to an already-indexed DB
+    immediately. Never fatal. Returns rows updated across all state_*.sqlite.
+    """
+    import sqlite3
+
+    updated = 0
+    for db in sorted((Path.home() / ".codex").glob("state_*.sqlite")):
+        try:
+            con = sqlite3.connect(str(db))
+            try:
+                cur = con.execute(
+                    "UPDATE threads SET cwd = ? WHERE id = ?", (new_cwd, session_id)
+                )
+                con.commit()
+                updated += cur.rowcount or 0
+            finally:
+                con.close()
+        except Exception:
+            continue
+    return updated
 
 
 def _append_migration_marker(jsonl_path: Path, old_cwd: str, new_cwd: str, session_id: str) -> None:
