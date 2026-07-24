@@ -118,7 +118,7 @@ def _archive_dir(jsonl_path: Path, layout: Optional[str] = None) -> Path:
         layout = str(get_archive_pref("archive_folder_layout"))
     project_dir = jsonl_path.parent
     if layout == "central":
-        # Use the project folder name as-is, for example -home-yooha-...-MindVault.
+        # Use the project folder name as-is, for example -home-user-...-project.
         return CENTRAL_ARCHIVE_ROOT / project_dir.name
     # default: per_project
     return project_dir / "archive"

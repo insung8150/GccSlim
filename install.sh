@@ -83,6 +83,37 @@ if [[ -d "$ROOT/optional" ]]; then
   fi
 fi
 
+# VS Code bridge extension — required for VS Code terminal detection/injection.
+# Copy the bundled vsix so it can be (re)installed manually, and try to install
+# it automatically if a VS Code CLI is on PATH. Auto-install is best-effort:
+# failure here must never abort the whole install.
+if [[ -d "$ROOT/vscode-bridge" ]]; then
+  install -d -m 0755 "$SHARE_DIR/vscode-bridge"
+  bridge_vsix=""
+  for vsix in "$ROOT"/vscode-bridge/*.vsix; do
+    [[ -f "$vsix" ]] || continue
+    install -m 0644 "$vsix" "$SHARE_DIR/vscode-bridge/$(basename "$vsix")"
+    bridge_vsix="$SHARE_DIR/vscode-bridge/$(basename "$vsix")"
+  done
+  if [[ -n "$bridge_vsix" ]]; then
+    code_cli=""
+    for c in code code-insiders codium cursor; do
+      if command -v "$c" >/dev/null 2>&1; then code_cli="$c"; break; fi
+    done
+    if [[ -n "$code_cli" ]]; then
+      if "$code_cli" --install-extension "$bridge_vsix" --force >/dev/null 2>&1; then
+        echo "Installed VS Code bridge extension via '$code_cli' (restart VS Code to activate)"
+      else
+        echo "VS Code bridge vsix copied to $bridge_vsix"
+        echo "  Install manually: $code_cli --install-extension $bridge_vsix"
+      fi
+    else
+      echo "VS Code bridge vsix copied to $bridge_vsix"
+      echo "  No VS Code CLI found; install manually: code --install-extension $bridge_vsix"
+    fi
+  fi
+fi
+
 echo "Installed GccSlim to $BIN_DIR"
 echo "Integration assets in $INTEGRATION_DIR"
 echo "Run: gccslim"

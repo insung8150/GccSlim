@@ -232,7 +232,7 @@ BRIDGE_ALIVE_DIR = CLAUDE_ROOT / "gccfork-bridge-alive"
 BRIDGE_ALIVE_FILE_LEGACY = CLAUDE_ROOT / "gccfork-bridge-alive.txt"
 BRIDGE_ALIVE_MAX_AGE = 60  # heartbeat older than 60 seconds is considered dead
 
-GCCFORK_VERSION = "2026.05.25.2"
+GCCFORK_VERSION = "2026.07.25.1"
 GCCFORK_WORKER = "Claude"
 
 
@@ -9727,7 +9727,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             if used == "vscode":
                 self.notify(
                     "VS Code bridge extension is not installed or is inactive.\n"
-                    "Run `code --install-extension gccfork-bridge-0.1.0.vsix` and restart VS Code.\n"
+                    "Install the bundled extension:\n"
+                    "  code --install-extension ~/.local/share/gccslim/vscode-bridge/gccfork-bridge-0.2.0.vsix\n"
+                    "then restart VS Code. (Re-running install.sh installs it automatically.)\n"
                     "Or install an external terminal such as gnome-terminal and retry.",
                     severity="error",
                     timeout=12,
@@ -9790,7 +9792,9 @@ class GCCForkApp(MergeMixin, ArchiveMixin, DeepSearchMixin, TuiRequestPollerMixi
             elif used == "vscode":
                 self.notify(
                     "VS Code bridge extension is not installed or is inactive.\n"
-                    "Run `code --install-extension gccfork-bridge-0.1.0.vsix` and restart VS Code.",
+                    "Install the bundled extension:\n"
+                    "  code --install-extension ~/.local/share/gccslim/vscode-bridge/gccfork-bridge-0.2.0.vsix\n"
+                    "then restart VS Code. (Re-running install.sh installs it automatically.)",
                     severity="error",
                     timeout=12,
                 )
